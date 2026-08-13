@@ -4,6 +4,20 @@
 
 `postman2api` is a self-hosted Bun service that exposes a Postman-backed AI chat workflow through OpenAI-compatible and Anthropic-compatible APIs. It includes a local dashboard for account management, multi-account pooling, session-aware routing, and streamed responses.
 
+## Account Registration Module (Known Issues)
+
+Automated Postman account registration (single and batch) is provided by the [`@postman2api/postman-register`](packages/postman-register/) package, a Camoufox/Playwright browser-automation tool. See [its README](packages/postman-register/README.md) for usage.
+
+> **Known issues — fixes are welcome via pull request**
+>
+> The flow depends on live page structure and browser behavior, and is not stable yet:
+>
+> - **Element-detection failures end the whole run.** When a page structure changes or loads slower than expected, a selector cannot find its target and the single-run flow terminates immediately.
+> - **Batch registration often cannot run continuously.** With `--count N`, some rounds abort early because of leftover state from the previous round or unhandled exceptions, so the full round count is rarely reached.
+> - **Unexpected termination.** Cloudflare challenges, verification-code polling timeouts, browser crashes, and similar conditions can exit the process without the intended fallback handling.
+>
+> If you fix any of these (start with the candidate selectors in `packages/postman-register/src/selectors/` and the batch orchestration in `packages/postman-register/src/index.ts`), please open a pull request.
+
 ## Features
 
 - OpenAI-compatible `POST /v1/chat/completions`
