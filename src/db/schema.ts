@@ -43,7 +43,20 @@ export const settings = sqliteTable("settings", {
   updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
 });
 
+export const sessionStates = sqliteTable("session_states", {
+  sessionId: text("session_id").primaryKey(),
+  accountId: integer("account_id"),
+  messages: text("messages").notNull(),
+  revision: integer("revision").notNull().default(1),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+}, (table) => [
+  index("session_states_updated_at_idx").on(table.updatedAt),
+  index("session_states_account_idx").on(table.accountId),
+]);
+
 export type Account = typeof accounts.$inferSelect;
 export type NewAccount = typeof accounts.$inferInsert;
 export type RequestLog = typeof requestLogs.$inferSelect;
 export type NewRequestLog = typeof requestLogs.$inferInsert;
+export type SessionState = typeof sessionStates.$inferSelect;

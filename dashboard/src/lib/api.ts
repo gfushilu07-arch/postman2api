@@ -30,6 +30,47 @@ export interface Account {
   createdAt?: string;
 }
 
+export interface AccountTestLogEntry {
+  step: string;
+  message: string;
+  level: "info" | "success" | "warn" | "error";
+  ts: number;
+  elapsedMs: number;
+}
+
+export interface AccountTestResult {
+  success: boolean;
+  available: boolean;
+  accountId: number;
+  email?: string;
+  model: string;
+  prompt: string;
+  response?: string;
+  error?: string;
+  durationMs: number;
+  matchedExpectedResponse?: boolean;
+  logs: AccountTestLogEntry[];
+}
+
+export interface AccountImportResult {
+  index: number;
+  email?: string;
+  status: "created" | "updated" | "failed";
+  accountId?: number;
+  error?: string;
+}
+
+export interface AccountImportResponse {
+  success: boolean;
+  summary: {
+    total: number;
+    created: number;
+    updated: number;
+    failed: number;
+  };
+  results: AccountImportResult[];
+}
+
 export interface Stats {
   totalRequests: number;
   successRequests: number;
@@ -46,10 +87,22 @@ export async function fetchAccounts(): Promise<{ data: Account[] }> {
   return api("/api/accounts");
 }
 
-export async function loginAccount(email: string, password: string, headless: boolean): Promise<{ success: boolean }> {
+export async function loginAccount(
+  email: string,
+  flow: "login" | "signup" = "login",
+  confirmationId?: string,
+  signupAutomation?: { username?: string; password: string },
+): Promise<{ success: boolean; accountId?: number; imported?: boolean }> {
   return api("/api/accounts/login", {
     method: "POST",
-    body: JSON.stringify({ email, password, headless }),
+    body: JSON.stringify({ email, flow, confirmationId, signupAutomation }),
+  });
+}
+
+export async function confirmSignup(confirmationId: string): Promise<{ success: boolean }> {
+  return api("/api/accounts/signup/confirm", {
+    method: "POST",
+    body: JSON.stringify({ confirmationId }),
   });
 }
 
@@ -60,12 +113,23 @@ export async function addAccountManual(email: string, tokens: any): Promise<{ su
   });
 }
 
+export async function importAccounts(payload: unknown): Promise<AccountImportResponse> {
+  return api("/api/accounts/import", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function deleteAccount(id: number): Promise<{ success: boolean }> {
   return api(`/api/accounts/${id}`, { method: "DELETE" });
 }
 
-export async function warmupAccount(id: number): Promise<{ success: boolean; error?: string }> {
+export async function warmupAccount(id: number): Promise<{ success: boolean; error?: string; account: Account }> {
   return api(`/api/accounts/${id}/warmup`, { method: "POST" });
+}
+
+export async function testAccount(id: number): Promise<AccountTestResult> {
+  return api(`/api/accounts/${id}/test`, { method: "POST" });
 }
 
 export async function toggleAccount(id: number, enabled: boolean): Promise<{ success: boolean }> {

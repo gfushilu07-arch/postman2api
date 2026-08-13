@@ -41,13 +41,24 @@ async function migrate() {
     updated_at INTEGER
   )`);
 
+  await db.run(sql`CREATE TABLE IF NOT EXISTS session_states (
+    session_id TEXT PRIMARY KEY,
+    account_id INTEGER,
+    messages TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  )`);
+
   await db.run(sql`CREATE INDEX IF NOT EXISTS request_logs_created_at_idx ON request_logs(created_at)`);
   await db.run(sql`CREATE INDEX IF NOT EXISTS request_logs_status_created_at_idx ON request_logs(status, created_at)`);
   await db.run(sql`CREATE INDEX IF NOT EXISTS request_logs_account_idx ON request_logs(account_id)`);
+  await db.run(sql`CREATE INDEX IF NOT EXISTS session_states_updated_at_idx ON session_states(updated_at)`);
+  await db.run(sql`CREATE INDEX IF NOT EXISTS session_states_account_idx ON session_states(account_id)`);
 
   await db.run(sql`INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('admin_key', 'postman2api', ${Date.now()})`);
 
-  console.log("[migrate] Done. Tables created: accounts, request_logs, settings");
+  console.log("[migrate] Done. Tables created: accounts, request_logs, settings, session_states");
   client.close();
 }
 

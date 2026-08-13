@@ -11,6 +11,7 @@ import { db } from "./db/index";
 import { settings } from "./db/schema";
 import { eq } from "drizzle-orm";
 import { isDefaultEncryptionKey } from "./utils/crypto";
+import { acceptsApiKey } from "./auth/api-key";
 
 const app = new Hono();
 
@@ -19,9 +20,8 @@ app.get("/health", (c) => c.json({ status: "ok", uptime: process.uptime() }));
 
 // API key auth middleware for /v1/* routes (API consumers)
 app.use("/v1/*", async (c, next) => {
-  const auth = c.req.header("Authorization") || "";
   const apiKey = await getApiKey();
-  if (auth !== `Bearer ${apiKey}`) {
+  if (!acceptsApiKey(apiKey, c.req.header("Authorization"), c.req.header("x-api-key"))) {
     return c.json({ error: { message: "Invalid API key", type: "invalid_api_key" } }, 401);
   }
   await next();
@@ -33,6 +33,12 @@ app.route("/", modelsRouter);
 app.route("/api/accounts", accountsRouter);
 app.route("/api/stats", statsRouter);
 app.route("/api/settings", settingsRouter);
+
+app.get("/docs/postman-account-token.md", async () => {
+  const file = Bun.file("docs/postman-account-token.md");
+  if (!(await file.exists())) return new Response("Document not found", { status: 404 });
+  return new Response(file, { headers: { "Content-Type": "text/markdown; charset=utf-8" } });
+});
 
 // Serve dashboard static files
 app.get("*", async (c) => {
@@ -58,7 +64,18 @@ async function getApiKey(): Promise<string> {
 // Start server
 const server = Bun.serve({
   port: config.port,
-  fetch: app.fetch,
+  idleTimeout: config.serverIdleTimeoutSeconds,
+  fetch(request, bunServer) {
+    const url = new URL(request.url);
+    if (url.pathname === "/ws") {
+      if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+        return new Response("Expected a WebSocket upgrade request", { status: 426 });
+      }
+      if (bunServer.upgrade(request)) return;
+      return new Response("WebSocket upgrade failed", { status: 400 });
+    }
+    return app.fetch(request);
+  },
   websocket: {
     open(ws) {
       addClient(ws);
@@ -83,7 +100,7 @@ console.log(`[postman2api] Server running on http://localhost:${config.port}`);
 console.log(`[postman2api] OpenAI:  http://localhost:${config.port}/v1/chat/completions`);
 console.log(`[postman2api] Anthropic: http://localhost:${config.port}/v1/messages`);
 console.log(`[postman2api] Dashboard: http://localhost:${config.port}/`);
-console.log(`[postman2api] WebSocket: ws://localhost:${config.port}`);
+console.log(`[postman2api] WebSocket: ws://localhost:${config.port}/ws`);
 
 process.on("SIGTERM", () => {
   stopWarmupScheduler();

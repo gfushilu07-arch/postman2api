@@ -268,6 +268,12 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
   }
 
   const estimatedInputTokens = estimateInputTokens();
+  let sourceReader: {
+    read(): Promise<{ done: boolean; value?: Uint8Array }>;
+    cancel(reason?: unknown): Promise<void>;
+    releaseLock(): void;
+  } | undefined;
+  let cancelled = false;
 
   function event(name: string, data: unknown) {
     return encoder.encode(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
@@ -276,6 +282,8 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       const reader = stream.getReader();
+      sourceReader = reader;
+      let completed = false;
 
       const startMessage = () => {
         if (started) return;
@@ -330,7 +338,7 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
 
       try {
         startMessage();
-        while (true) {
+        while (!cancelled) {
           const { done, value } = await reader.read();
           if (done) break;
           buffer += decoder.decode(value, { stream: true });
@@ -438,27 +446,47 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
             }
           }
         }
+        completed = !cancelled;
+      } catch (error) {
+        if (!cancelled) controller.error(error);
       } finally {
-        if (textBlockOpen) controller.enqueue(event("content_block_stop", { type: "content_block_stop", index: blockIndex }));
-        closeThinkingBlock();
-        for (const toolBlockIndex of toolBlocks.values()) {
-          if (!closedToolBlocks.has(toolBlockIndex)) {
-            controller.enqueue(event("content_block_stop", { type: "content_block_stop", index: toolBlockIndex }));
+        if (completed) {
+          if (textBlockOpen) controller.enqueue(event("content_block_stop", { type: "content_block_stop", index: blockIndex }));
+          closeThinkingBlock();
+          for (const toolBlockIndex of toolBlocks.values()) {
+            if (!closedToolBlocks.has(toolBlockIndex)) {
+              controller.enqueue(event("content_block_stop", { type: "content_block_stop", index: toolBlockIndex }));
+            }
           }
+          const outputTokens = usageFromUpstream.completion_tokens > 0
+            ? usageFromUpstream.completion_tokens
+            : Math.max(1, Math.ceil(index / 4));
+          const inputTokens = usageFromUpstream.prompt_tokens > 0
+            ? usageFromUpstream.prompt_tokens
+            : estimatedInputTokens;
+          controller.enqueue(event("message_delta", {
+            type: "message_delta",
+            delta: { stop_reason: stopReason, stop_sequence: null },
+            usage: { input_tokens: inputTokens, output_tokens: outputTokens },
+          }));
+          controller.enqueue(event("message_stop", { type: "message_stop" }));
+          controller.close();
         }
-        const outputTokens = usageFromUpstream.completion_tokens > 0
-          ? usageFromUpstream.completion_tokens
-          : Math.max(1, Math.ceil(index / 4));
-        const inputTokens = usageFromUpstream.prompt_tokens > 0
-          ? usageFromUpstream.prompt_tokens
-          : estimatedInputTokens;
-        controller.enqueue(event("message_delta", {
-          type: "message_delta",
-          delta: { stop_reason: stopReason, stop_sequence: null },
-          usage: { input_tokens: inputTokens, output_tokens: outputTokens },
-        }));
-        controller.enqueue(event("message_stop", { type: "message_stop" }));
-        controller.close();
+        try {
+          reader.releaseLock();
+        } catch {
+          // Cancellation can retain the lock until the source settles.
+        }
+        sourceReader = undefined;
+      }
+    },
+    async cancel(reason) {
+      if (cancelled) return;
+      cancelled = true;
+      try {
+        await sourceReader?.cancel(reason);
+      } catch {
+        // Cancellation is best-effort.
       }
     },
   });

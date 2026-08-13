@@ -2,6 +2,7 @@ import type { ChatCompletionRequest, ProviderResult } from "../provider/base";
 import { PostmanProvider } from "../provider/postman";
 import { pool } from "./pool";
 import type { Account } from "../db/schema";
+import { scheduleProvisioningWarmup } from "../auth/warmup";
 
 const provider = new PostmanProvider();
 
@@ -9,6 +10,7 @@ export interface RouteResult {
   result: ProviderResult;
   account: Account;
   durationMs: number;
+  leaseId: string;
 }
 
 function isClientDisconnect(error: string): boolean {
@@ -17,46 +19,46 @@ function isClientDisconnect(error: string): boolean {
 
 function isTransientError(error: string): boolean {
   const lower = error.toLowerCase();
-  return lower.includes("timeout") || lower.includes("econnreset") || lower.includes("fetch failed") || lower.includes("network");
+  return lower.includes("timeout")
+    || lower.includes("econnreset")
+    || lower.includes("fetch failed")
+    || lower.includes("network")
+    || lower.includes("server error (5");
 }
 
-function jitteredDelay(attempt: number, isRateLimit: boolean = false): Promise<void> {
-  const base = isRateLimit ? 1000 * Math.pow(2, attempt) : 100 * Math.pow(2, attempt);
-  const jitter = Math.random() * base * 0.5;
-  return new Promise((resolve) => setTimeout(resolve, base + jitter));
+function isAuthenticationError(error: string): boolean {
+  const lower = error.toLowerCase();
+  return lower.includes("invalid or missing postman tokens")
+    || lower.includes("account disabled")
+    || lower.includes("session expired")
+    || lower.includes("expired")
+    || lower.includes("401")
+    || lower.includes("403");
 }
 
 export async function routeRequest(
   request: ChatCompletionRequest,
   stream: boolean,
 ): Promise<RouteResult> {
-  const maxRetries = 3;
+  if (!provider.ownsModel(request.model)) {
+    throw new Error(`Invalid model: ${request.model}`);
+  }
+
   let lastError = "";
   const excludedAccountIds = new Set<number>();
 
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    if (attempt > 0) {
-      const isRateLimit = lastError.toLowerCase().includes("rate limit") || lastError.includes("429");
-      await jitteredDelay(attempt, isRateLimit);
-    }
-
-    const account = await pool.getNextAccount();
-    if (!account) {
+  while (true) {
+    const lease = await pool.acquireNextAccount(request._sessionId, excludedAccountIds);
+    if (!lease) {
+      if (excludedAccountIds.size > 0) break;
       throw new Error("No active accounts available. Add a Postman account first.");
     }
-
-    if (excludedAccountIds.has(account.id)) {
-      lastError = "All available accounts exhausted";
-      continue;
-    }
+    const { account, leaseId } = lease;
 
     const startTime = Date.now();
-    let tracked = false;
+    let tracked = true;
 
     try {
-      pool.trackRequestStart(account.id);
-      tracked = true;
-
       const result = stream
         ? await provider.chatCompletionStream(account, request)
         : await provider.chatCompletion(account, request);
@@ -64,12 +66,26 @@ export async function routeRequest(
       const durationMs = Date.now() - startTime;
 
       if (result.success) {
+        // A completed non-streaming provider call no longer contributes load.
+        // Release it before any database bookkeeping, which can be slower.
+        if (!result.stream) {
+          pool.trackRequestEnd(account.id, leaseId);
+          tracked = false;
+        } else {
+          await result.setStreamFailureHandler?.(async (failure) => {
+            if (failure.kind === "quota_exhausted") {
+              pool.releaseSession(request._sessionId, account.id);
+              await pool.markExhausted(account.id);
+            }
+          });
+        }
         if (result.tokens) await pool.updateTokens(account.id, result.tokens);
         await pool.markUsed(account.id);
-        return { result, account, durationMs };
+        // Streaming requests stay in-flight until their body completes or is cancelled.
+        return { result, account, durationMs, leaseId };
       }
 
-      pool.trackRequestEnd(account.id);
+      pool.trackRequestEnd(account.id, leaseId);
       tracked = false;
 
       if (isClientDisconnect(result.error || "")) {
@@ -77,42 +93,68 @@ export async function routeRequest(
       }
 
       if (result.rateLimited) {
+        pool.releaseSession(request._sessionId, account.id);
+        excludedAccountIds.add(account.id);
         lastError = result.error || "Rate limited";
+        pool.markCooling(account.id, result.retryAfterMs || 30_000, lastError);
         continue;
       }
 
       if (result.quotaExhausted) {
+        pool.releaseSession(request._sessionId, account.id);
         await pool.markExhausted(account.id);
         excludedAccountIds.add(account.id);
         lastError = result.error || "Quota exhausted";
         continue;
       }
 
-      if (
-        result.error?.includes("expired") ||
-        result.error?.includes("401") ||
-        result.error?.includes("402") ||
-        result.error?.includes("403")
-      ) {
-        await pool.markTransientFailure(account.id, result.error || "Auth failed");
-        lastError = result.error || "Auth failed";
+      if (result.retryable) {
+        pool.releaseSession(request._sessionId, account.id);
+        excludedAccountIds.add(account.id);
+        await pool.markTransientFailure(account.id, result.error || "Postman AI is not ready yet");
+        pool.markCooling(account.id, 15_000, result.error || "Postman AI is not ready yet");
+        scheduleProvisioningWarmup(account.id);
+        lastError = result.error || "Postman AI is not ready yet";
+        continue;
+      }
+
+      if (result.error?.includes("402")) {
+        pool.releaseSession(request._sessionId, account.id);
+        await pool.markExhausted(account.id);
+        excludedAccountIds.add(account.id);
+        lastError = result.error || "Payment required";
+        continue;
+      }
+
+      if (isAuthenticationError(result.error || "")) {
+        pool.releaseSession(request._sessionId, account.id);
+        excludedAccountIds.add(account.id);
+        await pool.markError(account.id, result.error || "Authentication failed");
+        lastError = result.error || "Authentication failed";
         continue;
       }
 
       if (isTransientError(result.error || "")) {
         await pool.markTransientFailure(account.id, result.error || "Transient error");
-      } else {
-        await pool.markError(account.id, result.error || "Unknown error");
+        // The upstream chat endpoint is a state-changing POST. A reset/timeout can
+        // happen after Postman accepted it, so replaying it could duplicate a turn.
+        // Only explicit rejection responses handled above (429/auth/quota) retry.
+        return { result, account, durationMs, leaseId };
       }
-      lastError = result.error || "Unknown error";
+
+      await pool.markError(account.id, result.error || "Unknown error");
+      return { result, account, durationMs, leaseId };
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
       if (tracked) {
-        pool.trackRequestEnd(account.id);
+        pool.trackRequestEnd(account.id, leaseId);
         tracked = false;
       }
       if (isClientDisconnect(errMsg)) throw error;
       lastError = errMsg;
+      // Unknown exceptions may happen after the state-changing POST was accepted.
+      // Do not replay the same turn on another account without an explicit safe signal.
+      break;
     }
   }
 

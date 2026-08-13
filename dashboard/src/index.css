@@ -69,7 +69,16 @@ tr:hover td{background:#fdfdfd}
 .row-icon-btn{width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;color:#9a9a9a;transition:color .15s;border:none;background:none;cursor:pointer;padding:0}
 .row-icon-btn svg{width:14px;height:14px;stroke:currentColor;stroke-linecap:round;stroke-linejoin:round;fill:none;stroke-width:1.9}
 .row-icon-btn:hover{color:#555}
+.row-icon-btn:disabled{cursor:not-allowed;opacity:.45}
 .row-icon-btn.is-loading svg{animation:spin .85s linear infinite}
+.row-test-btn{height:26px;min-width:58px;padding:0 9px;border-radius:7px;display:inline-flex;align-items:center;justify-content:center;gap:5px;background:#f5f5f5;color:#666;font-size:11px;font-weight:600;border:1px solid #ececec;transition:background .15s,border-color .15s,color .15s}
+.row-test-btn:hover{background:#efefef;border-color:#dfdfdf;color:#333}
+.row-test-btn:focus-visible{box-shadow:0 0 0 2px rgba(17,17,17,.14)}
+.row-test-btn:disabled{cursor:not-allowed;opacity:.65}
+.row-test-btn svg{width:13px;height:13px;stroke:currentColor;stroke-linecap:round;stroke-linejoin:round;fill:none;stroke-width:2.2}
+.row-test-btn.is-success{color:#347a57;background:#f2f8f4;border-color:#dcece2}
+.row-test-btn.is-error{color:#a45d56;background:#fbf3f2;border-color:#f0deda}
+.row-test-spinner{width:11px;height:11px;border:1.5px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .75s linear infinite}
 .row-icon-danger{color:#b7726a}
 .row-icon-danger:hover{color:#92514b}
 @keyframes spin{to{transform:rotate(360deg)}}
@@ -92,6 +101,9 @@ tr:hover td{background:#fdfdfd}
 .modal-title{font-size:16px;font-weight:600;margin-bottom:14px}
 .dialog-body{display:grid;gap:12px}
 .dialog-help{font-size:12px;color:var(--fg-muted);margin-bottom:2px}
+.signup-guide{display:grid;gap:10px}
+.signup-steps{display:grid;gap:7px;padding-left:20px;color:#505050;font-size:12px;line-height:1.55}
+.signup-warning{padding:9px 10px;border:1px solid #ead7c5;border-radius:6px;background:#fff8f1;color:#7b4d2c;font-size:11px;line-height:1.5}
 .dialog-field{display:flex;align-items:center;gap:10px}
 .dialog-label{width:54px;font-size:13px;color:var(--fg-muted);flex:0 0 auto}
 .dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
@@ -107,6 +119,19 @@ tr:hover td{background:#fdfdfd}
 .input::placeholder{color:var(--fg-subtle)}
 textarea.input{height:auto;padding:10px 12px;resize:vertical}
 select.input{cursor:pointer;padding-right:28px;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23999' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 8px center}
+
+.modal.import-modal{width:min(640px,calc(100vw - 32px))}
+.import-section{display:grid;gap:10px}
+.import-textarea{min-height:280px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;line-height:1.55}
+.import-doc-link{width:fit-content;color:#315e9b;font-size:12px;text-decoration:none}
+.import-doc-link:hover{text-decoration:underline}
+.import-result{overflow:hidden;border:1px solid var(--border);border-radius:8px;background:var(--bg-card)}
+.import-result-summary{padding:9px 11px;border-bottom:1px solid var(--border);font-size:12px;font-weight:600}
+.import-result-list{max-height:160px;overflow:auto}
+.import-result-row{display:flex;justify-content:space-between;gap:12px;padding:8px 11px;font-size:12px}
+.import-result-row+.import-result-row{border-top:1px solid var(--border)}
+.import-result-row.is-created span:last-child,.import-result-row.is-updated span:last-child{color:#18794e}
+.import-result-row.is-failed span:last-child{color:#b42318;text-align:right}
 
 .settings-card{background:#fff;border-radius:14px;padding:22px;margin-bottom:16px;max-width:640px}
 .settings-row{display:grid;gap:6px;margin-bottom:18px}
@@ -150,6 +175,10 @@ select.input{cursor:pointer;padding-right:28px;appearance:none;background-image:
 .login-log-body::-webkit-scrollbar{width:6px}
 .login-log-body::-webkit-scrollbar-track{background:transparent}
 .login-log-body::-webkit-scrollbar-thumb{background:#333;border-radius:3px}
+.signup-confirm-row{margin-top:14px;padding:10px 12px;border:1px solid #dce9e0;border-radius:7px;background:#f4faf6;display:flex;align-items:center;justify-content:space-between;gap:12px;color:#55705f;font-size:11px}
+.signup-confirm-btn{background:#e1f1e6;color:#2d704c}
+.signup-confirm-btn:hover{background:#d5eadc}
+.signup-confirm-btn:disabled{cursor:not-allowed;opacity:.55}
 .login-log-line{display:flex;gap:8px;align-items:flex-start;color:#ccc}
 .login-log-time{color:#666;flex-shrink:0;white-space:nowrap}
 .login-log-step{color:#7aa2c9;flex-shrink:0;white-space:nowrap;min-width:80px}
@@ -158,6 +187,27 @@ select.input{cursor:pointer;padding-right:28px;appearance:none;background-image:
 .login-log-warn .login-log-msg{color:#e8a847}
 .login-log-error .login-log-msg{color:#e85d5d}
 .login-log-error .login-log-step{color:#e85d5d}
+.login-log-success .login-log-msg{color:#75c895}
+.login-log-success .login-log-step{color:#75c895}
+
+.account-test-log-overlay{width:min(620px,calc(100vw - 48px))}
+.test-log-status{font-size:10px;font-weight:700;padding:2px 7px;border-radius:999px}
+.test-log-status.is-success{color:#75c895;background:rgba(117,200,149,.12)}
+.test-log-status.is-error{color:#e9837c;background:rgba(233,131,124,.12)}
+.test-log-summary{padding:14px 16px;background:#151515;border-bottom:1px solid #2a2a2a;color:#aaa;font-size:12px;display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:10px 18px}
+.test-log-summary>div{display:flex;align-items:baseline;gap:8px;min-width:0}
+.test-log-summary span{color:#666;flex-shrink:0}
+.test-log-summary strong{color:#ddd;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.test-log-summary .test-log-prompt{grid-column:1/-1;align-items:flex-start}
+.test-log-prompt code{color:#ddd;white-space:normal;line-height:1.55;word-break:break-word}
+.test-log-summary .test-log-notice{grid-column:1/-1;color:#8f7c5d;font-size:11px}
+.test-log-body{max-height:360px}
+
+@media (max-width:720px){
+  .account-test-log-overlay{bottom:12px;right:12px;width:calc(100vw - 24px)}
+  .test-log-summary{grid-template-columns:1fr}
+  .test-log-summary .test-log-prompt,.test-log-summary .test-log-notice{grid-column:1}
+}
 
 .headless-toggle{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--fg-muted);cursor:pointer;padding:4px 0}
 .headless-toggle input{width:16px;height:16px;accent-color:var(--fg);cursor:pointer}

@@ -1,0 +1,19 @@
+{
+  "name": "@postman2api/camoufox-automation-example",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun src/index.ts",
+    "start:headless": "bun src/index.ts --headless",
+    "typecheck": "bunx tsc --noEmit"
+  },
+  "dependencies": {
+    "camoufox-js": "0.12.0",
+    "playwright": "1.60.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.8.0"
+  }
+}

@@ -6,6 +6,7 @@ import {
   openAIToAnthropic,
   type AnthropicMessagesRequest,
 } from "../proxy/transforms/anthropic";
+import { resolveClientSessionId } from "./client-session";
 
 export const chatRouter = new Hono();
 
@@ -24,6 +25,7 @@ chatRouter.post("/v1/chat/completions", async (c) => {
     return c.json({ error: { message: "Missing 'messages' field", type: "invalid_request" } }, 400);
   }
 
+  body._sessionId = resolveClientSessionId(c.req.raw.headers, body, "openai");
   const signal = c.req.raw.signal;
   const response = await handleChatCompletion(body, signal);
 
@@ -52,10 +54,19 @@ chatRouter.post("/v1/messages", async (c) => {
 
   const openAIRequest = anthropicToOpenAI(body);
   openAIRequest._originalModel = originalModel;
+  openAIRequest._sessionId = resolveClientSessionId(c.req.raw.headers, body, "anthropic");
   const signal = c.req.raw.signal;
 
   try {
     const response = await handleChatCompletion(openAIRequest, signal);
+
+    if (!response.ok) {
+      const message = await readErrorMessage(response);
+      return c.json(
+        { type: "error", error: { type: "api_error", message } },
+        response.status as any,
+      );
+    }
 
     if (body.stream === true) {
       const stream = response.body;
@@ -74,13 +85,6 @@ chatRouter.post("/v1/messages", async (c) => {
 
     const text = await response.text();
     const openAIResponse = JSON.parse(text);
-
-    if (openAIResponse.error) {
-      return c.json(
-        { type: "error", error: { type: "api_error", message: openAIResponse.error?.message || openAIResponse.error } },
-        500 as any,
-      );
-    }
 
     const result = openAIToAnthropic(openAIResponse, body);
     result.model = originalModel;
@@ -109,4 +113,14 @@ function normalizeModel(model: string): string {
   if (m.startsWith("claude-")) return "claude-sonnet-4-5";
   if (m.startsWith("gpt-")) return m;
   return m;
+}
+
+async function readErrorMessage(response: Response): Promise<string> {
+  const text = await response.text();
+  try {
+    const body = JSON.parse(text);
+    return String(body?.error?.message || body?.error || text || `HTTP ${response.status}`);
+  } catch {
+    return text || `HTTP ${response.status}`;
+  }
 }

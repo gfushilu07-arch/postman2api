@@ -4,7 +4,7 @@
  *
  * Usage:
  *   bun src/cli.ts serve [--port 1930]        Start server
- *   bun src/cli.ts login <email> <password>   Login Postman account via browser
+ *   bun src/cli.ts login <email>             Open visible browser for manual login
  *   bun src/cli.ts accounts                    List accounts
  *   bun src/cli.ts quota                       Check account quotas
  *   bun src/cli.ts status                      Show config overview
@@ -17,7 +17,6 @@ import { eq } from "drizzle-orm";
 import { config } from "./config";
 import { loginPostmanAccount } from "./auth/bridge";
 import { warmupAccount } from "./auth/warmup";
-import { encrypt } from "./utils/crypto";
 
 const C: Record<string, string> = {
   reset: "\x1b[0m", green: "\x1b[32m", yellow: "\x1b[33m",
@@ -33,7 +32,7 @@ function usage(): void {
 
 Usage:
   bun src/cli.ts serve [--port 1930]        Start server
-  bun src/cli.ts login <email> <password>   Login Postman via browser (Camoufox)
+  bun src/cli.ts login <email>             Open visible browser for manual login (Camoufox)
   bun src/cli.ts accounts                    List accounts
   bun src/cli.ts quota                       Check account quotas
   bun src/cli.ts status                      Show config overview
@@ -51,14 +50,13 @@ async function cmdServe(args: string[]): Promise<void> {
 }
 
 async function cmdLogin(args: string[]): Promise<void> {
-  if (args.length < 2) {
-    console.log(c("Usage: bun src/cli.ts login <email> <password>", "red"));
+  const email = args[0];
+  if (!email || email.startsWith("--")) {
+    console.log(c("Usage: bun src/cli.ts login <email>", "red"));
     return;
   }
-  const [email, password] = args;
-  const headless = args.includes("--headless");
-  console.log(c(`Logging in ${email} via Camoufox (headless=${headless})...`, "cyan"));
-  const result = await loginPostmanAccount(email, password, headless, (log) => {
+  console.log(c(`Opening visible Camoufox login browser for ${email}...`, "cyan"));
+  const result = await loginPostmanAccount(email, (log) => {
     console.log(c(`  [${log.step}]`, "blue") + ` ${log.msg}`);
   });
   if (result.success) {
@@ -103,8 +101,6 @@ async function cmdStatus(): Promise<void> {
   console.log(`Port          : ${c(String(config.port), "blue")}`);
   console.log(`Admin Key     : ${"Set"}`);
   console.log(`API Key       : ${config.apiKey}`);
-  console.log(`Browser       : ${c(config.browserEngine, "blue")}`);
-  console.log(`Python Path   : ${c(config.pythonPath, "blue")}`);
 
   const allAccounts = await db.select().from(accounts);
   const active = allAccounts.filter((a) => a.status === "active" && a.enabled);

@@ -23,6 +23,7 @@ export interface ChatCompletionRequest {
   thinking?: { type: string; budget_tokens?: number; display?: string; effort?: string; summary?: string };
   signal?: AbortSignal;
   _originalModel?: string;
+  _sessionId?: string;
 }
 
 export interface ChatCompletionChoice {
@@ -77,10 +78,29 @@ export interface ModelInfo {
   creditUnit?: CreditUnit;
 }
 
+export type StreamFailureKind = "quota_exhausted" | "upstream_error";
+
+export interface StreamFailure {
+  kind: StreamFailureKind;
+  error: Error;
+}
+
+export interface TokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
 export interface ProviderResult {
   success: boolean;
   response?: ChatCompletionResponse;
   stream?: ReadableStream<Uint8Array>;
+  getStreamMessage?: () => ChatMessage | undefined;
+  getStreamTokenUsage?: () => TokenUsage;
+  getStreamFailure?: () => StreamFailure | undefined;
+  setStreamFailureHandler?: (
+    handler: (failure: StreamFailure) => void | Promise<void>,
+  ) => void | Promise<void>;
   tokensUsed?: number;
   promptTokens?: number;
   completionTokens?: number;
@@ -89,6 +109,8 @@ export interface ProviderResult {
   error?: string;
   quotaExhausted?: boolean;
   rateLimited?: boolean;
+  retryAfterMs?: number;
+  retryable?: boolean;
   tokens?: unknown;
 }
 
@@ -97,7 +119,14 @@ export interface ProviderHealthResult {
   success: boolean;
   retryable?: boolean;
   error?: string;
-  quota?: { limit: number; remaining: number; used: number; resetAt?: Date | string | null; source?: string };
+  quota?: {
+    limit: number;
+    remaining: number;
+    used: number;
+    resetAt?: Date | string | null;
+    source?: string;
+    overageAllowed?: boolean;
+  };
 }
 
 export abstract class BaseProvider {
@@ -162,14 +191,22 @@ export abstract class BaseProvider {
     timeoutMs = config.providerRequestTimeoutMs,
     ttfbTimeoutMs?: number,
     clientSignal?: AbortSignal,
+    options: { verbose?: boolean; context?: string } = {},
   ): Promise<Response> {
     const controller = new AbortController();
-    const totalTimer = setTimeout(() => controller.abort(new Error(`Upstream timeout after ${timeoutMs}ms`)), timeoutMs);
-    const ttfbTimer = ttfbTimeoutMs && ttfbTimeoutMs < timeoutMs
-      ? setTimeout(() => controller.abort(new Error(`Upstream connect timeout after ${ttfbTimeoutMs}ms`)), ttfbTimeoutMs)
-      : null;
+    const connectTimeoutMs = Math.min(timeoutMs, ttfbTimeoutMs ?? timeoutMs);
+    const connectTimer = setTimeout(
+      () => controller.abort(new Error(`Upstream connect timeout after ${connectTimeoutMs}ms`)),
+      connectTimeoutMs,
+    );
 
     let clientAbortHandler: (() => void) | undefined;
+    const cleanupClientSignal = () => {
+      if (clientAbortHandler && clientSignal) {
+        clientSignal.removeEventListener("abort", clientAbortHandler);
+        clientAbortHandler = undefined;
+      }
+    };
     if (clientSignal && !clientSignal.aborted) {
       clientAbortHandler = () => controller.abort(new Error("Client disconnected"));
       clientSignal.addEventListener("abort", clientAbortHandler, { once: true });
@@ -177,16 +214,121 @@ export abstract class BaseProvider {
       controller.abort(new Error("Client already disconnected"));
     }
 
+    const context = options.context || "Upstream request";
+    const startedAt = Date.now();
+    const diagnosticUrl = safeDiagnosticUrl(url);
+    const logVerbose = (phase: string, details: string) => {
+      if (!options.verbose) return;
+      // Deliberately do not use Bun's native fetch `verbose`: it prints Cookie and
+      // Authorization headers. This diagnostic contains no headers, query, or body.
+      console.error(`[fetch] ${context} ${phase}: ${init.method || "GET"} ${diagnosticUrl} ${details}`);
+    };
+
+    let response: Response;
     try {
-      const response = await fetch(url, { ...init, signal: controller.signal } as any);
-      if (ttfbTimer) clearTimeout(ttfbTimer);
-      return response;
-    } finally {
-      clearTimeout(totalTimer);
-      if (ttfbTimer) clearTimeout(ttfbTimer);
-      if (clientAbortHandler && clientSignal) {
-        clientSignal.removeEventListener("abort", clientAbortHandler);
-      }
+      logVerbose("start", `connectTimeoutMs=${connectTimeoutMs}`);
+      response = await fetch(url, { ...init, signal: controller.signal } as any);
+      logVerbose("headers", `status=${response.status} elapsedMs=${Date.now() - startedAt}`);
+    } catch (error) {
+      clearTimeout(connectTimer);
+      cleanupClientSignal();
+      const contextualError = upstreamFetchError(context, "before response headers", error, controller.signal);
+      logVerbose("error", `elapsedMs=${Date.now() - startedAt} error=${contextualError.message}`);
+      throw contextualError;
     }
+    clearTimeout(connectTimer);
+
+    if (!response.body) {
+      cleanupClientSignal();
+      return response;
+    }
+
+    // fetch() resolves when headers arrive. Keep cancellation wired for the full
+    // response lifecycle and apply an inactivity timeout to every body read.
+    const reader = response.body.getReader();
+    let finished = false;
+    let bytesRead = 0;
+    let chunksRead = 0;
+    const cleanup = () => {
+      if (finished) return;
+      finished = true;
+      cleanupClientSignal();
+      try {
+        reader.releaseLock();
+      } catch {
+        // A pending read owns the lock until abort/cancel settles.
+      }
+    };
+
+    const body = new ReadableStream<Uint8Array>({
+      async pull(streamController) {
+        let readTimer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          readTimer = setTimeout(() => {
+            controller.abort(new Error(`Upstream stream idle timeout after ${config.streamReadTimeoutMs}ms`));
+          }, config.streamReadTimeoutMs);
+          const { done, value } = await reader.read();
+          if (done) {
+            logVerbose("complete", `elapsedMs=${Date.now() - startedAt} chunks=${chunksRead} bytes=${bytesRead}`);
+            cleanup();
+            streamController.close();
+          } else {
+            chunksRead++;
+            bytesRead += value.byteLength;
+            streamController.enqueue(value);
+          }
+        } catch (error) {
+          const contextualError = upstreamFetchError(
+            context,
+            `while reading response body after ${chunksRead} chunk(s) / ${bytesRead} byte(s)`,
+            error,
+            controller.signal,
+          );
+          logVerbose("error", `elapsedMs=${Date.now() - startedAt} error=${contextualError.message}`);
+          cleanup();
+          streamController.error(contextualError);
+        } finally {
+          if (readTimer) clearTimeout(readTimer);
+        }
+      },
+      async cancel(reason) {
+        try {
+          const cancelError = reason instanceof Error ? reason : new Error(String(reason ?? "Response cancelled"));
+          logVerbose("cancel", `elapsedMs=${Date.now() - startedAt} reason=${cancelError.message}`);
+          controller.abort(cancelError);
+          await reader.cancel(reason);
+        } catch {
+          // Cancellation is best-effort.
+        } finally {
+          cleanup();
+        }
+      },
+    });
+
+    return new Response(body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
   }
+}
+
+function safeDiagnosticUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    return `${url.protocol}//${url.host}${url.pathname}`;
+  } catch {
+    return "<invalid-url>";
+  }
+}
+
+function upstreamFetchError(
+  context: string,
+  phase: string,
+  error: unknown,
+  signal: AbortSignal,
+): Error {
+  const cause = signal.aborted ? signal.reason : error;
+  const message = cause instanceof Error ? cause.message : String(cause);
+  return new Error(`${context} ${phase}: ${message}`, { cause: error });
 }

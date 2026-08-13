@@ -7,11 +7,20 @@
     "dev": "bun --watch src/index.ts",
     "migrate": "bun src/db/migrate.ts",
     "build": "cd dashboard && bun run build",
-    "typecheck": "bunx tsc --noEmit"
+    "typecheck": "bunx tsc --noEmit",
+    "test": "bun test",
+    "postinstall": "bun scripts/install-camoufox.ts",
+    "test:stream": "bun test tests/stream-cancel.test.ts",
+    "browser:camoufox:fetch": "bun scripts/install-camoufox.ts",
+    "browser:camoufox:smoke": "bun scripts/camoufox-smoke.ts",
+    "browser:camoufox:smoke:node": "node --experimental-strip-types scripts/camoufox-smoke.ts",
+    "browser:camoufox:smoke:postman": "bun scripts/camoufox-smoke.ts --postman-login"
   },
   "dependencies": {
+    "camoufox-js": "0.12.0",
     "drizzle-orm": "^0.45.2",
-    "hono": "^4.12.17"
+    "hono": "^4.12.17",
+    "playwright": "1.60.0"
   },
   "devDependencies": {
     "@types/bun": "latest",

@@ -18,36 +18,67 @@ export interface PostmanUsage {
   usageState: string;
 }
 
+export interface PostmanTokenUsage {
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+}
+
+const QUOTA_ERROR_PATTERNS = [
+  "usage_limit_exceeded",
+  "quota_exceeded",
+  "monthly ai credit limit",
+  "ai credit limit",
+  "regain agent mode access",
+  "enable pay-as-you-go",
+  "enable pay as you go",
+];
+
+export function isPostmanQuotaExceeded(value: unknown): boolean {
+  const text = typeof value === "string" ? value : safeStringify(value);
+  const normalized = text.toLowerCase();
+  return QUOTA_ERROR_PATTERNS.some((pattern) => normalized.includes(pattern));
+}
+
 export class PostmanStreamReader {
   private finished = false;
   private _quotaExceeded = false;
   private _usage: PostmanUsage | null = null;
+  private _tokenUsage: PostmanTokenUsage | null = null;
   private _error: string | null = null;
+  private _retryableError = false;
   private _model: string | null = null;
   private _conversationId: string | null = null;
+  private _sawEvent = false;
   private _sawToolCall = false;
   private _toolCallIndex = new Map<string, number>();
 
   get quotaExceeded(): boolean { return this._quotaExceeded; }
   get usage(): PostmanUsage | null { return this._usage; }
+  get tokenUsage(): PostmanTokenUsage | null { return this._tokenUsage; }
   get error(): string | null { return this._error; }
+  get retryableError(): boolean { return this._retryableError; }
   get actualModel(): string | null { return this._model; }
   get conversationId(): string | null { return this._conversationId; }
+  get sawEvent(): boolean { return this._sawEvent; }
 
   feed(line: string): PostmanDelta[] {
     const trimmed = line.trim();
-    if (!trimmed || !trimmed.startsWith("data: ")) return [];
+    const match = /^data:\s*(.+)$/.exec(trimmed);
+    if (!match) return [];
 
     let event: any;
     try {
-      event = JSON.parse(trimmed.slice(6));
+      event = JSON.parse(match[1]!);
     } catch {
       return [];
     }
 
     if (!event || typeof event !== "object") return [];
+    this._sawEvent = true;
 
-    switch (event.eventType) {
+    const eventType = String(event.eventType || event.type || "");
+    switch (eventType) {
       case "usage":
         return this.handleUsage(event.data);
       case "conversation":
@@ -61,6 +92,8 @@ export class PostmanStreamReader {
         return [];
       case "failure":
         return this.handleFailure(event.data);
+      case "error":
+        return this.handleFailure(event.data ?? event.error ?? event);
       case "toolCallChunk":
         return this.handleToolCallChunk(event.data);
       case "info":
@@ -69,6 +102,9 @@ export class PostmanStreamReader {
       case "thinkingComplete":
         return [];
       default:
+        if (/fail|error/i.test(eventType) || isPostmanQuotaExceeded(event)) {
+          return this.handleFailure(event.data ?? event.error ?? event);
+        }
         return [];
     }
   }
@@ -88,7 +124,28 @@ export class PostmanStreamReader {
       userType: data.userType ?? "",
       usageState: data.usageState ?? "",
     };
-    if (data.usageState === "EXCEEDED" || data.usageState === "UNAVAILABLE") {
+    const promptTokens = firstFiniteNumber(
+      data.prompt_tokens,
+      data.promptTokens,
+      data.input_tokens,
+      data.inputTokens,
+    );
+    const completionTokens = firstFiniteNumber(
+      data.completion_tokens,
+      data.completionTokens,
+      data.output_tokens,
+      data.outputTokens,
+    );
+    const totalTokens = firstFiniteNumber(data.total_tokens, data.totalTokens);
+    if (promptTokens !== undefined || completionTokens !== undefined || totalTokens !== undefined) {
+      this._tokenUsage = { promptTokens, completionTokens, totalTokens };
+    }
+    const usageState = String(data.usageState || "").toUpperCase();
+    if (
+      usageState === "EXCEEDED"
+      || usageState === "UNAVAILABLE"
+      || isPostmanQuotaExceeded(data)
+    ) {
       this._quotaExceeded = true;
     }
     return [];
@@ -153,10 +210,55 @@ export class PostmanStreamReader {
   }
 
   private handleFailure(data: any): PostmanDelta[] {
-    this._error = data?.userMessage || data?.errorType || "Unknown Postman error";
-    if (data?.errorType === "USAGE_LIMIT_EXCEEDED") {
+    this._error = extractFailureMessage(data);
+    this._retryableError = this._error === "Unknown Postman error";
+    if (this._retryableError) {
+      this._error = "Postman AI access is not ready for this team yet. Confirm that organization AI access is enabled, then retry shortly.";
+    }
+    if (isPostmanQuotaExceeded(data) || isPostmanQuotaExceeded(this._error)) {
       this._quotaExceeded = true;
+      this._retryableError = false;
     }
     return [];
+  }
+}
+
+function firstFiniteNumber(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    if (value === null || value === undefined || value === "") continue;
+    const number = Number(value);
+    if (Number.isFinite(number) && number >= 0) return number;
+  }
+  return undefined;
+}
+
+function extractFailureMessage(value: unknown): string {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (!value || typeof value !== "object") return "Unknown Postman error";
+
+  const data = value as Record<string, unknown>;
+  for (const key of ["userMessage", "message", "detail", "reason"]) {
+    const candidate = data[key];
+    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+  }
+  for (const key of ["error", "data", "cause"]) {
+    const candidate = data[key];
+    if (candidate && typeof candidate === "object") {
+      const nested = extractFailureMessage(candidate);
+      if (nested !== "Unknown Postman error") return nested;
+    }
+  }
+  for (const key of ["errorType", "code"]) {
+    const candidate = data[key];
+    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+  }
+  return "Unknown Postman error";
+}
+
+function safeStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value) || "";
+  } catch {
+    return String(value ?? "");
   }
 }

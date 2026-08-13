@@ -1,152 +1,92 @@
-import { config } from "../config";
 import { db } from "../db/index";
 import { accounts } from "../db/schema";
 import { encrypt } from "../utils/crypto";
 import { broadcast } from "../ws/index";
 import { eq } from "drizzle-orm";
+import {
+  loginPostman,
+  type LoginLogEntry,
+  type PostmanAuthFlow,
+  type PostmanLoginOptions,
+  type PostmanLoginResult,
+  type SignupAutomation,
+} from "./postman-login";
+import { pool } from "../proxy/pool";
+import { warmupAccount } from "./warmup";
+import { testAccountAvailability } from "./account-test";
 
-export interface PostmanLoginResult {
-  postman_sid: string;
-  user_id: string;
-  workspace_id: string;
-  workspace_subdomain: string;
-  error?: string;
-}
+export type { LoginLogEntry, PostmanLoginResult } from "./postman-login";
 
-export interface LoginLogEntry {
-  step: string;
-  msg: string;
-  level: string;
-  ts: number;
+export interface LoginDependencies {
+  login: (email: string | undefined, options: PostmanLoginOptions) => Promise<PostmanLoginResult>;
+  warmup?: (accountId: number) => Promise<{ success: boolean; error?: string }>;
+  test?: (accountId: number) => Promise<{ available: boolean; error?: string }>;
 }
 
 export async function loginPostmanAccount(
-  email: string,
-  password: string,
-  headless: boolean,
+  requestedEmail: string | undefined,
   onLog?: (log: LoginLogEntry) => void,
+  dependencies: LoginDependencies = {
+    login: loginPostman,
+    warmup: warmupAccount,
+    test: testAccountAvailability,
+  },
+  flow: PostmanAuthFlow = "login",
+  confirmationId?: string,
+  signupAutomation?: SignupAutomation,
 ): Promise<{ success: boolean; accountId?: number; error?: string }> {
-  const scriptPath = config.authScriptCwd + "/postman_login.py";
+  let email = requestedEmail?.trim() || `${flow}-pending@postman.local`;
+  const emit = (step: string, msg: string, level = "info") => {
+    const entry = { step, msg, level, ts: Date.now() / 1000 };
+    onLog?.(entry);
+    broadcast({ type: "login_log", data: { email, ...entry } });
+  };
 
   try {
-    const proc = Bun.spawn({
-      cmd: [
-        config.pythonPath, scriptPath,
-        "--email", email,
-        "--password", password,
-        ...(headless ? ["--headless"] : []),
-      ],
-      cwd: config.authScriptCwd,
-      env: {
-        ...process.env,
-        CAMOUFOX_HEADLESS: headless ? "true" : "false",
+    const result = await dependencies.login(requestedEmail, {
+      flow,
+      confirmationId,
+      signupAutomation,
+      onLog: (logEntry) => {
+        onLog?.(logEntry);
+        broadcast({ type: "login_log", data: { email, ...logEntry } });
       },
-      stdout: "pipe",
-      stderr: "pipe",
     });
 
-    const stderrLines: string[] = [];
-    const stderrReader = (async () => {
-      const reader = proc.stderr.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          stderrLines.push(line);
-          try {
-            const logEntry = JSON.parse(line) as LoginLogEntry;
-            onLog?.(logEntry);
-            broadcast({
-              type: "login_log",
-              data: { email, ...logEntry },
-            });
-          } catch {
-            broadcast({
-              type: "login_log",
-              data: { email, step: "raw", msg: line, level: "info", ts: Date.now() / 1000 },
-            });
-          }
-        }
-      }
-      if (buffer.trim()) {
-        try {
-          const logEntry = JSON.parse(buffer) as LoginLogEntry;
-          onLog?.(logEntry);
-          broadcast({
-            type: "login_log",
-            data: { email, ...logEntry },
-          });
-        } catch {
-          broadcast({
-            type: "login_log",
-            data: { email, step: "raw", msg: buffer, level: "info", ts: Date.now() / 1000 },
-          });
-        }
-      }
-    })();
-
-    const stdout = await new Response(proc.stdout).text();
-    await stderrReader;
-    const exitCode = await proc.exited;
-
-    if (exitCode !== 0) {
-      const lastErr = stderrLines.length > 0
-        ? stderrLines.filter(l => l.includes('"level":"error"')).pop() || stderrLines[stderrLines.length - 1]
-        : "";
-      let errorMsg = "Login script failed";
-      try {
-        const parsed = JSON.parse(lastErr);
-        errorMsg = parsed.msg || errorMsg;
-      } catch {
-        errorMsg = lastErr || errorMsg;
-      }
-      console.error("[auth:bridge] Python script error:", errorMsg);
-      return { success: false, error: errorMsg };
-    }
-
-    const result: PostmanLoginResult = JSON.parse(stdout.trim());
-
     if (result.error) {
+      broadcast({ type: "login_done", data: { email, success: false, error: result.error } });
       return { success: false, error: result.error };
     }
-
     if (!result.postman_sid || !result.workspace_subdomain) {
-      return { success: false, error: "Incomplete tokens from login script" };
+      const error = "Incomplete tokens from browser login";
+      broadcast({ type: "login_done", data: { email, success: false, error } });
+      return { success: false, error };
     }
 
-    const tokens = {
+    email = requestedEmail?.trim().toLowerCase() || result.email?.trim().toLowerCase() || `user-${result.user_id}@postman.local`;
+
+    emit("保存账号", "凭据已提取，正在保存账号...");
+    const tokensJson = JSON.stringify({
       postman_sid: result.postman_sid,
       user_id: result.user_id,
       workspace_id: result.workspace_id,
       workspace_subdomain: result.workspace_subdomain,
-    };
-
-    const encryptedPassword = encrypt(password);
-    const tokensJson = JSON.stringify(tokens);
-
+    });
+    const encryptedPassword = encrypt("manual-browser-login");
     const existing = await db.select().from(accounts).where(eq(accounts.email, email)).limit(1);
-
     let accountId: number;
 
     if (existing.length > 0) {
-      const [updated] = await db.update(accounts)
-        .set({
-          password: encryptedPassword,
-          tokens: tokensJson,
-          status: "active",
-          lastLoginAt: new Date(),
-          updatedAt: new Date(),
-          errorMessage: null,
-        })
-        .where(eq(accounts.id, existing[0]!.id))
-        .returning({ id: accounts.id });
+      const [updated] = await db.update(accounts).set({
+        password: encryptedPassword,
+        tokens: tokensJson,
+        status: "active",
+        lastLoginAt: new Date(),
+        updatedAt: new Date(),
+        errorMessage: null,
+      }).where(eq(accounts.id, existing[0]!.id)).returning({ id: accounts.id });
       accountId = updated!.id;
+      pool.invalidate(accountId);
     } else {
       const [created] = await db.insert(accounts).values({
         email,
@@ -161,9 +101,38 @@ export async function loginPostmanAccount(
     }
 
     broadcast({ type: "account_added", data: { id: accountId, email, status: "active" } });
-    broadcast({ type: "login_done", data: { email, success: true } });
+    emit("自动导入", `账号已自动导入账号池（ID ${accountId}）。`, "info");
 
-    console.log(`[auth:bridge] Account ${email} logged in successfully (id=${accountId})`);
+    if (dependencies.warmup) {
+      emit("额度检查", "正在读取团队 AI 额度并确认账号状态...");
+      const warmup = await dependencies.warmup(accountId);
+      const [checked] = await db.select().from(accounts).where(eq(accounts.id, accountId)).limit(1);
+      if (!warmup.success) {
+        emit("额度检查", warmup.error || "额度获取失败，请检查套餐与 Team AI 设置。", "warn");
+      } else if (checked?.status === "exhausted") {
+        emit("额度检查", "账号已保存，但团队 AI 额度已耗尽。", "warn");
+      } else if (checked?.quotaLimit && checked.quotaRemaining != null) {
+        emit("额度检查", `账号正常，剩余 ${checked.quotaRemaining} / ${checked.quotaLimit} credits。`, "info");
+      } else {
+        emit("额度检查", "账号已保存；额度暂未返回，可稍后在账号列表刷新。", "warn");
+      }
+    }
+
+    if (flow === "signup" && dependencies.test) {
+      const [checked] = await db.select().from(accounts).where(eq(accounts.id, accountId)).limit(1);
+      if (checked?.status === "active") {
+        emit("可用性验证", "正在发送最小测试问题，确认 Agent Mode 可返回内容...");
+        const test = await dependencies.test(accountId);
+        if (test.available) {
+          emit("可用性验证", "Agent Mode 已返回有效响应，账号接入完成。", "info");
+        } else {
+          emit("可用性验证", test.error || "Agent Mode 暂不可用，请检查 Team AI 设置。", "warn");
+        }
+      }
+    }
+
+    broadcast({ type: "login_done", data: { email, success: true } });
+    console.log(`[auth:bridge] Account ${email} connected successfully (id=${accountId}, flow=${flow})`);
     return { success: true, accountId };
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
@@ -176,11 +145,8 @@ export async function loginPostmanAccount(
 export async function validatePostmanSession(accountId: number): Promise<boolean> {
   const [account] = await db.select().from(accounts).where(eq(accounts.id, accountId)).limit(1);
   if (!account?.tokens) return false;
-
   try {
-    const tokens = typeof account.tokens === "string"
-      ? JSON.parse(account.tokens)
-      : account.tokens;
+    const tokens = typeof account.tokens === "string" ? JSON.parse(account.tokens) : account.tokens;
     return !!(tokens?.postman_sid && tokens?.workspace_subdomain);
   } catch {
     return false;

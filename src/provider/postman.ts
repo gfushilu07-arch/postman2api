@@ -7,12 +7,19 @@ import {
   type ProviderHealthResult,
   type ProviderResult,
   type StreamChunk,
+  type StreamFailure,
 } from "./base";
 import type { Account } from "../db/schema";
+import { config } from "../config";
 import { POSTMAN_MODEL_MAP, POSTMAN_MODELS, resolvePostmanModel } from "./models";
-import { PostmanStreamReader, type PostmanDelta } from "./sse-stream";
+import {
+  isPostmanQuotaExceeded,
+  PostmanStreamReader,
+  type PostmanDelta,
+} from "./sse-stream";
 import type { PostmanTokens } from "./transcript";
 import { extractTextFromMessage, isAnthropicToolResult } from "./transcript";
+import { getConversationId, setConversationId } from "./conversation-store";
 
 const DEFAULT_APP_VERSION = "12.15.4-260616-1202";
 const CHAT_ENDPOINT = "/_gw/chat";
@@ -20,8 +27,6 @@ const REQUEST_TIMEOUT_MS = 300_000;
 const TTFB_TIMEOUT_MS = 45_000;
 const MAX_QUERY_LEN = 9_500;
 const MAX_CONTEXT_LEN = 800_000;
-
-const conversationMap = new Map<string, string>();
 
 const TRANSIENT_ERROR_PATTERNS = [
   "too much data",
@@ -46,7 +51,7 @@ export class PostmanProvider extends BaseProvider {
     return model.toLowerCase() in POSTMAN_MODEL_MAP;
   }
 
-  private resolveModel(model: string): string | null {
+  private resolveModel(model: string): string | null | undefined {
     return resolvePostmanModel(model);
   }
 
@@ -85,6 +90,19 @@ export class PostmanProvider extends BaseProvider {
     };
   }
 
+  private buildUsageHeaders(tokens: PostmanTokens): Record<string, string> {
+    const subdomain = tokens.workspace_subdomain;
+    return {
+      Cookie: `postman.sid=${tokens.postman_sid}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      "x-app-version": DEFAULT_APP_VERSION,
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+      Origin: `https://${subdomain}.postman.co`,
+      Referer: `https://${subdomain}.postman.co/billing/add-ons/overview`,
+    };
+  }
+
   private buildThirdPartyTools(tools?: any[]): Record<string, { tools: PostmanMCPTool[] }> {
     if (!Array.isArray(tools) || tools.length === 0) return {};
     const mcpTools: PostmanMCPTool[] = [];
@@ -101,13 +119,13 @@ export class PostmanProvider extends BaseProvider {
     return { "proxy-tools": { tools: mcpTools } };
   }
 
-  private splitMessages(messages: ChatMessage[], accountId: string): {
+  private splitMessages(messages: ChatMessage[], conversationId: string | null): {
     query: string;
     seedingMessages: [{ role: "user"; content: string }, { role: "assistant"; content: string }] | null;
   } {
     const lastMsg = messages[messages.length - 1];
     const isToolResultTail = lastMsg?.role === "tool" || isAnthropicToolResult(lastMsg);
-    const hasConversationId = conversationMap.has(accountId);
+    const hasConversationId = Boolean(conversationId);
 
     let query: string;
     let queryMsgIdx: number;
@@ -207,13 +225,13 @@ export class PostmanProvider extends BaseProvider {
   private buildRequestBody(
     request: ChatCompletionRequest,
     tokens: PostmanTokens,
-    postmanModel: string,
+    postmanModel: string | null,
     accountId: string,
   ): any {
-    const { query, seedingMessages } = this.splitMessages(request.messages, accountId);
+    const conversationId = getConversationId(accountId, request._sessionId);
+    const { query, seedingMessages } = this.splitMessages(request.messages, conversationId);
     const thirdParty = this.buildThirdPartyTools(request.tools);
     const hasTools = Object.keys(thirdParty).length > 0;
-    const conversationId = conversationMap.get(accountId) || null;
 
     const input: any = {
       chatType: "USER_QUERY",
@@ -265,7 +283,7 @@ export class PostmanProvider extends BaseProvider {
         supportsAskUser: false,
         supportsActionRecommendations: true,
         useThinkingModeIfAvailable: true,
-        thinkingLevel: "medium",
+        thinkingLevel: "xhigh",
       },
     };
 
@@ -274,7 +292,7 @@ export class PostmanProvider extends BaseProvider {
 
   async chatCompletion(account: Account, request: ChatCompletionRequest): Promise<ProviderResult> {
     const postmanModel = this.resolveModel(request.model);
-    if (postmanModel === null) return { success: false, error: `Invalid model: ${request.model}` };
+    if (postmanModel === undefined) return { success: false, error: `Invalid model: ${request.model}` };
 
     const tokens = this.getTokens(account);
     if (!tokens) return { success: false, error: "Invalid or missing Postman tokens" };
@@ -287,6 +305,7 @@ export class PostmanProvider extends BaseProvider {
         `https://${tokens.workspace_subdomain}.postman.co${CHAT_ENDPOINT}`,
         { method: "POST", headers: this.buildHeaders(tokens), body: JSON.stringify(body) },
         REQUEST_TIMEOUT_MS, TTFB_TIMEOUT_MS, request.signal,
+        { verbose: config.postmanFetchVerbose, context: "Postman chat" },
       );
 
       const statusResult = this.checkResponseStatus(response);
@@ -301,8 +320,23 @@ export class PostmanProvider extends BaseProvider {
         deltas.push(...reader.feed(line));
       }
 
-      if (reader.quotaExceeded) return { success: false, error: "Postman AI quota exceeded", rateLimited: true };
-      if (reader.error) return { success: false, error: reader.error };
+      if (reader.quotaExceeded) {
+        return {
+          success: false,
+          error: reader.error || "Postman AI quota exceeded",
+          quotaExhausted: true,
+        };
+      }
+      if (reader.error) {
+        return {
+          success: false,
+          error: reader.error,
+          ...(reader.retryableError ? { retryable: true } : {}),
+        };
+      }
+      if (reader.conversationId) {
+        setConversationId(account.id, request._sessionId, reader.conversationId);
+      }
 
       deltas.push(...reader.finish());
 
@@ -334,14 +368,20 @@ export class PostmanProvider extends BaseProvider {
       if (reasoningContent) message.reasoning_content = reasoningContent;
       if (toolCalls.length > 0) message.tool_calls = toolCalls;
 
+      const upstreamTokens = reader.tokenUsage;
+      const promptTokens = upstreamTokens?.promptTokens ?? this.estimateMessagesTokens(request.messages);
+      const completionTokens = upstreamTokens?.completionTokens
+        ?? this.estimateTokens(content + reasoningContent);
+      const totalTokens = upstreamTokens?.totalTokens ?? promptTokens + completionTokens;
+
       const completionResponse: ChatCompletionResponse = {
         id: completionId, object: "chat.completion", created: Math.floor(Date.now() / 1000),
         model: request.model,
         choices: [{ index: 0, message, finish_reason: toolCalls.length > 0 ? "tool_calls" : content ? "stop" : null }],
         usage: {
-          prompt_tokens: this.estimateMessagesTokens(request.messages),
-          completion_tokens: this.estimateTokens(content + reasoningContent),
-          total_tokens: this.estimateMessagesTokens(request.messages) + this.estimateTokens(content + reasoningContent),
+          prompt_tokens: promptTokens,
+          completion_tokens: completionTokens,
+          total_tokens: totalTokens,
         },
       };
 
@@ -353,7 +393,7 @@ export class PostmanProvider extends BaseProvider {
 
   async chatCompletionStream(account: Account, request: ChatCompletionRequest): Promise<ProviderResult> {
     const postmanModel = this.resolveModel(request.model);
-    if (postmanModel === null) return { success: false, error: `Invalid model: ${request.model}` };
+    if (postmanModel === undefined) return { success: false, error: `Invalid model: ${request.model}` };
 
     const tokens = this.getTokens(account);
     if (!tokens) return { success: false, error: "Invalid or missing Postman tokens" };
@@ -365,38 +405,209 @@ export class PostmanProvider extends BaseProvider {
         `https://${tokens.workspace_subdomain}.postman.co${CHAT_ENDPOINT}`,
         { method: "POST", headers: this.buildHeaders(tokens), body: JSON.stringify(body) },
         REQUEST_TIMEOUT_MS, TTFB_TIMEOUT_MS, request.signal,
+        { verbose: config.postmanFetchVerbose, context: "Postman chat" },
       );
 
       const statusResult = this.checkResponseStatus(response);
       if (statusResult) return statusResult;
       if (!response.body) return { success: false, error: "Postman returned no response body" };
 
+      const contentType = response.headers.get("content-type") || "";
+      if (contentType.includes("application/json")) {
+        const text = await response.text();
+        const error = extractUpstreamError(text);
+        return {
+          success: false,
+          error,
+          ...(isPostmanQuotaExceeded(text) || isPostmanQuotaExceeded(error)
+            ? { quotaExhausted: true }
+            : {}),
+        };
+      }
+
       const completionId = this.generateId();
       const pmReader = new PostmanStreamReader();
       const upstreamReader = response.body.getReader();
       const decoder = new TextDecoder();
       let ndjsonBuffer = "";
+      let rawPrefix = "";
+      let upstreamDone = false;
+      const initialDeltas: PostmanDelta[] = [];
+
+      const feedLines = (lines: string[], output: PostmanDelta[]) => {
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          output.push(...pmReader.feed(line));
+        }
+      };
+
+      while (!upstreamDone && !initialDeltas.some(isMeaningfulDelta)) {
+        const { done, value } = await upstreamReader.read();
+        if (done) {
+          upstreamDone = true;
+          ndjsonBuffer += decoder.decode(new Uint8Array(0), { stream: false });
+          feedLines(ndjsonBuffer.split("\n"), initialDeltas);
+          break;
+        }
+
+        const decoded = decoder.decode(value, { stream: true });
+        rawPrefix = (rawPrefix + decoded).slice(-65_536);
+        ndjsonBuffer += decoded;
+        const lines = ndjsonBuffer.split("\n");
+        ndjsonBuffer = lines.pop() || "";
+        feedLines(lines, initialDeltas);
+
+        if (pmReader.quotaExceeded || pmReader.error) break;
+      }
+
+      if (pmReader.quotaExceeded) {
+        await cancelReader(upstreamReader, "quota exhausted");
+        return {
+          success: false,
+          error: pmReader.error || "Postman AI quota exceeded",
+          quotaExhausted: true,
+        };
+      }
+      if (pmReader.error) {
+        await cancelReader(upstreamReader, pmReader.error);
+        return {
+          success: false,
+          error: pmReader.error,
+          ...(pmReader.retryableError ? { retryable: true } : {}),
+        };
+      }
+      if (upstreamDone && !pmReader.sawEvent) {
+        upstreamReader.releaseLock();
+        return { success: false, error: extractUpstreamError(rawPrefix || ndjsonBuffer) };
+      }
+      if (pmReader.conversationId) {
+        setConversationId(account.id, request._sessionId, pmReader.conversationId);
+      }
+
+      let cancelled = false;
+      let closed = false;
+      let released = false;
+      let streamFailureHandler: ((failure: StreamFailure) => void | Promise<void>) | undefined;
+      let pendingStreamFailure: StreamFailure | undefined;
+      let lastStreamFailure: StreamFailure | undefined;
+      let streamFailureReported = false;
+      let streamContent = "";
+      let streamReasoningContent = "";
+      const streamToolCalls = new Map<string, { id: string; name: string; args: string }>();
+
+      const captureDelta = (delta: PostmanDelta) => {
+        if (delta.content) streamContent += delta.content;
+        if (delta.reasoning_content) streamReasoningContent += delta.reasoning_content;
+        for (const toolCall of delta.tool_calls || []) {
+          const key = String(toolCall.index);
+          if (toolCall.id && !streamToolCalls.has(key)) {
+            streamToolCalls.set(key, { id: toolCall.id, name: "", args: "" });
+          }
+          const entry = streamToolCalls.get(key);
+          if (!entry) continue;
+          if (toolCall.function?.name) entry.name = toolCall.function.name;
+          if (toolCall.function?.arguments) entry.args += toolCall.function.arguments;
+        }
+      };
+
+      const getStreamMessage = (): ChatMessage | undefined => {
+        const toolCalls = Array.from(streamToolCalls.values()).map((toolCall) => ({
+          id: toolCall.id,
+          type: "function" as const,
+          function: { name: toolCall.name, arguments: toolCall.args },
+        }));
+        if (!streamContent && !streamReasoningContent && toolCalls.length === 0) return undefined;
+        const message: any = { role: "assistant", content: streamContent || null };
+        if (streamReasoningContent) message.reasoning_content = streamReasoningContent;
+        if (toolCalls.length > 0) message.tool_calls = toolCalls;
+        return message;
+      };
+
+      const getStreamTokenUsage = () => {
+        const upstreamTokens = pmReader.tokenUsage;
+        const promptTokens = upstreamTokens?.promptTokens ?? this.estimateMessagesTokens(request.messages);
+        const toolArguments = Array.from(streamToolCalls.values())
+          .map((toolCall) => toolCall.args)
+          .join("");
+        const completionTokens = upstreamTokens?.completionTokens
+          ?? this.estimateTokens(streamContent + streamReasoningContent + toolArguments);
+        return {
+          promptTokens,
+          completionTokens,
+          totalTokens: upstreamTokens?.totalTokens ?? promptTokens + completionTokens,
+        };
+      };
+
+      const failStream = async (kind: StreamFailure["kind"], message: string): Promise<Error> => {
+        const error = new Error(message);
+        const failure = { kind, error };
+        lastStreamFailure = failure;
+        streamFailureReported = true;
+        if (streamFailureHandler) {
+          await streamFailureHandler(failure);
+        } else {
+          pendingStreamFailure = failure;
+        }
+        return error;
+      };
+
+      const releaseUpstreamReader = () => {
+        if (released) return;
+        try {
+          upstreamReader.releaseLock();
+          released = true;
+        } catch {
+          // A pending read may retain the lock; retry after cancellation settles.
+        }
+      };
 
       const stream = new ReadableStream<Uint8Array>({
         async start(controller) {
           const encoder = new TextEncoder();
           const emit = (delta: PostmanDelta) => {
-            controller.enqueue(encoder.encode(buildSSEChunk(delta, completionId, request.model)));
+            if (!cancelled && !closed) {
+              captureDelta(delta);
+              controller.enqueue(encoder.encode(buildSSEChunk(delta, completionId, request.model)));
+            }
           };
           try {
-            while (true) {
+            for (const delta of initialDeltas) emit(delta);
+
+            if (upstreamDone) {
+              for (const delta of pmReader.finish()) emit(delta);
+              controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+              closed = true;
+              controller.close();
+              return;
+            }
+
+            while (!cancelled && !closed) {
               const { done, value } = await upstreamReader.read();
+              if (cancelled || closed) break;
               if (done) {
                 ndjsonBuffer += decoder.decode(new Uint8Array(0), { stream: false });
                 for (const line of ndjsonBuffer.split("\n")) {
                   if (!line.trim()) continue;
                   for (const delta of pmReader.feed(line)) emit(delta);
                 }
-                if (pmReader.quotaExceeded) emit({ content: "[Error: Postman AI quota exceeded]" });
-                if (pmReader.conversationId) conversationMap.set(String(account.id), pmReader.conversationId);
+                if (pmReader.quotaExceeded) {
+                  throw await failStream(
+                    "quota_exhausted",
+                    pmReader.error || "Postman AI quota exceeded",
+                  );
+                }
+                if (pmReader.error) {
+                  throw await failStream("upstream_error", pmReader.error);
+                }
+                if (pmReader.conversationId) {
+                  setConversationId(account.id, request._sessionId, pmReader.conversationId);
+                }
                 for (const delta of pmReader.finish()) emit(delta);
-                controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-                controller.close();
+                if (!cancelled) {
+                  controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+                  closed = true;
+                  controller.close();
+                }
                 break;
               }
               ndjsonBuffer += decoder.decode(value, { stream: true });
@@ -407,20 +618,59 @@ export class PostmanProvider extends BaseProvider {
                 for (const delta of pmReader.feed(line)) emit(delta);
               }
               if (pmReader.quotaExceeded) {
-                emit({ content: "[Error: Postman AI quota exceeded]" });
-                controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-                controller.close();
-                break;
+                throw await failStream(
+                  "quota_exhausted",
+                  pmReader.error || "Postman AI quota exceeded",
+                );
+              }
+              if (pmReader.error) {
+                throw await failStream("upstream_error", pmReader.error);
+              }
+              if (pmReader.conversationId) {
+                setConversationId(account.id, request._sessionId, pmReader.conversationId);
               }
             }
           } catch (error) {
-            controller.error(error);
+            if (!cancelled && !closed) {
+              if (!streamFailureReported) {
+                const message = error instanceof Error ? error.message : String(error);
+                await failStream("upstream_error", message);
+              }
+              closed = true;
+              controller.error(error);
+            }
+          } finally {
+            releaseUpstreamReader();
           }
         },
-        cancel() { upstreamReader.cancel(); },
+        async cancel(reason) {
+          if (cancelled || closed) return;
+          cancelled = true;
+          try {
+            await upstreamReader.cancel(reason);
+          } catch {
+            // Cancellation is best-effort; never leave a rejected promise unhandled.
+          } finally {
+            releaseUpstreamReader();
+          }
+        },
       });
 
-      return { success: true, stream };
+      return {
+        success: true,
+        stream,
+        getStreamMessage,
+        getStreamTokenUsage,
+        getStreamFailure: () => lastStreamFailure,
+        setStreamFailureHandler: (handler) => {
+          streamFailureHandler = handler;
+          if (pendingStreamFailure) {
+            const failure = pendingStreamFailure;
+            pendingStreamFailure = undefined;
+            return handler(failure);
+          }
+        },
+      };
     } catch (error) {
       return { success: false, error: `Postman stream failed: ${error instanceof Error ? error.message : String(error)}` };
     }
@@ -428,21 +678,38 @@ export class PostmanProvider extends BaseProvider {
 
   private checkResponseStatus(response: Response): ProviderResult | null {
     if (response.status === 401 || response.status === 403) return { success: false, error: `Postman auth failed (${response.status})` };
-    if (response.status === 429) return { success: false, error: "Postman rate limited", rateLimited: true };
+    if (response.status === 429) {
+      return {
+        success: false,
+        error: "Postman rate limited",
+        rateLimited: true,
+        retryAfterMs: parseRetryAfterMs(response.headers.get("retry-after")),
+      };
+    }
     if (response.status >= 500) return { success: false, error: `Postman server error (${response.status})` };
     if (!response.ok) return { success: false, error: `Postman API error (${response.status})` };
     return null;
   }
 
   async refreshToken(_account: Account): Promise<{ success: boolean; tokens?: string; error?: string }> {
-    return { success: false, error: "Postman sessions require manual re-login via Google OAuth." };
+    return { success: false, error: "Postman sessions require manual re-login in the browser." };
   }
 
   async validateAccount(account: Account): Promise<boolean> {
     return this.getTokens(account) !== null;
   }
 
-  async fetchQuota(account: Account): Promise<{ success: boolean; quota?: { limit: number; remaining: number; used: number; resetAt?: Date | string | null }; error?: string }> {
+  async fetchQuota(account: Account): Promise<{
+    success: boolean;
+    quota?: {
+      limit: number;
+      remaining: number;
+      used: number;
+      resetAt?: Date | string | null;
+      overageAllowed?: boolean;
+    };
+    error?: string;
+  }> {
     const tokens = this.getTokens(account);
     if (!tokens) return { success: false, error: "Missing tokens" };
 
@@ -457,24 +724,87 @@ export class PostmanProvider extends BaseProvider {
         `https://${tokens.workspace_subdomain}.postman.co/_api/ws/proxy`,
         {
           method: "POST",
-          headers: { ...this.buildHeaders(tokens), "Content-Type": "application/json" },
+          // The usage proxy rejects the chat-only x-pstmn-req-service header.
+          headers: this.buildUsageHeaders(tokens),
           body,
           signal: AbortSignal.timeout(15000),
         },
       );
 
-      if (!response.ok) return { success: false, error: `Quota API error: ${response.status}` };
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        return {
+          success: false,
+          error: `Quota API error: ${response.status}${extractQuotaApiError(text) ? ` - ${extractQuotaApiError(text)}` : ""}`,
+        };
+      }
 
       const data = (await response.json()) as any;
-      const teamBlock = data?.data?.find((b: any) => b.entity_type === "team");
-      const entity = teamBlock?.entities?.[0];
+      const blocks = Array.isArray(data?.data) ? data.data : [];
+      const teamBlock = blocks.find((block: any) => block?.entity_type === "team");
+      const entity = teamBlock?.entities?.[0] ?? data?.data?.entity ?? data?.data;
       if (!entity) return { success: false, error: "No team quota entity found" };
 
-      const limit = Number(entity.limit) || 0;
-      const usage = Number(entity.usage) || 0;
-      const remaining = Math.max(0, limit - usage);
+      const rawLimit = firstFiniteNumber(
+        entity.limit,
+        entity.quota,
+        entity.total_limit,
+        entity.credit_limit,
+      );
+      const rawUsage = firstFiniteNumber(
+        entity.usage,
+        entity.used,
+        entity.consumed,
+        entity.total_usage,
+      );
+      const rawSpillage = firstFiniteNumber(
+        entity.spillage,
+        entity.overage_usage,
+        entity.excess_usage,
+      ) ?? 0;
+      const rawRemaining = firstFiniteNumber(
+        entity.remaining,
+        entity.remaining_credits,
+        entity.credits_remaining,
+        entity.quota_remaining,
+      );
+      const unitDivisor = String(entity.name || "").toLowerCase() === "ai_millicredits" ? 1000 : 1;
+      const limitValue = rawLimit === undefined ? undefined : rawLimit / unitDivisor;
+      const usageValue = rawUsage === undefined ? undefined : rawUsage / unitDivisor;
+      const spillageValue = rawSpillage / unitDivisor;
+      const remainingValue = rawRemaining === undefined ? undefined : rawRemaining / unitDivisor;
+      const effectiveUsage = usageValue === undefined ? undefined : usageValue + spillageValue;
+      const remaining = remainingValue ?? (
+        limitValue !== undefined && effectiveUsage !== undefined
+          ? Math.max(0, limitValue - effectiveUsage)
+          : undefined
+      );
+      if (remaining === undefined) {
+        return { success: false, error: "Quota response did not contain a remaining balance" };
+      }
 
-      return { success: true, quota: { limit, remaining, used: usage } };
+      const used = effectiveUsage ?? Math.max(0, (limitValue ?? remaining) - remaining);
+      const limit = limitValue ?? used + remaining;
+      const overageAllowed = firstBoolean(
+        entity.allowOverage,
+        entity.overage_allowed,
+        entity.overages_enabled,
+        entity.overage_enabled,
+        entity.payg_enabled,
+        entity.pay_as_you_go_enabled,
+        entity.allow_overage,
+      ) ?? false;
+
+      return {
+        success: true,
+        quota: {
+          limit,
+          remaining: Math.max(0, remaining),
+          used,
+          overageAllowed,
+          resetAt: entity.reset_at ?? entity.resetAt ?? entity.billing_period_end ?? null,
+        },
+      };
     } catch (error) {
       return { success: false, error: `Quota fetch failed: ${error instanceof Error ? error.message : String(error)}` };
     }
@@ -486,12 +816,17 @@ export class PostmanProvider extends BaseProvider {
 
     const quotaResult = await this.fetchQuota(account);
     if (!quotaResult.success || !quotaResult.quota) {
-      return { kind: "healthy", success: true, quota: { limit: 800000, remaining: 800000, used: 0, source: "postman.dynamic" } };
+      return {
+        kind: "transient_error",
+        success: false,
+        retryable: true,
+        error: quotaResult.error || "Postman quota is temporarily unavailable",
+      };
     }
 
     const q = quotaResult.quota;
     return {
-      kind: q.remaining <= 0 ? "exhausted" : "healthy",
+      kind: q.remaining <= 0 && !q.overageAllowed ? "exhausted" : "healthy",
       success: true,
       quota: { ...q, source: "postman.dynamic" } as any,
     };
@@ -511,4 +846,86 @@ function findLastIndex<T>(arr: T[], predicate: (item: T) => boolean): number {
     if (predicate(arr[i]!)) return i;
   }
   return -1;
+}
+
+function firstFiniteNumber(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    if (value === null || value === undefined || value === "") continue;
+    const number = Number(value);
+    if (Number.isFinite(number)) return number;
+  }
+  return undefined;
+}
+
+function firstBoolean(...values: unknown[]): boolean | undefined {
+  for (const value of values) {
+    if (typeof value === "boolean") return value;
+    if (typeof value === "number") return value !== 0;
+    if (typeof value === "string") {
+      const normalized = value.trim().toLowerCase();
+      if (["true", "yes", "enabled", "1"].includes(normalized)) return true;
+      if (["false", "no", "disabled", "0"].includes(normalized)) return false;
+    }
+  }
+  return undefined;
+}
+
+function extractQuotaApiError(text: string): string {
+  if (!text.trim()) return "";
+  try {
+    const data = JSON.parse(text) as any;
+    return String(data?.error?.message || data?.error?.details || data?.message || "").trim();
+  } catch {
+    return text.trim().slice(0, 300);
+  }
+}
+
+function parseRetryAfterMs(value: string | null): number {
+  if (!value) return 30_000;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.max(1_000, seconds * 1000);
+  const retryAt = Date.parse(value);
+  if (Number.isFinite(retryAt)) return Math.max(1_000, retryAt - Date.now());
+  return 30_000;
+}
+
+function isMeaningfulDelta(delta: PostmanDelta): boolean {
+  return Boolean(delta.content || delta.reasoning_content || delta.tool_calls?.length);
+}
+
+async function cancelReader(
+  reader: {
+    cancel(reason?: unknown): Promise<void>;
+    releaseLock(): void;
+  },
+  reason: string,
+): Promise<void> {
+  try {
+    await reader.cancel(reason);
+  } catch {
+    // Best-effort cancellation.
+  }
+  try {
+    reader.releaseLock();
+  } catch {
+    // The stream may already have released its lock.
+  }
+}
+
+function extractUpstreamError(text: string): string {
+  const fallback = "Postman returned an invalid streaming response";
+  const trimmed = text.trim();
+  if (!trimmed) return fallback;
+  try {
+    const parsed = JSON.parse(trimmed);
+    return String(
+      parsed?.error?.message ||
+      parsed?.error ||
+      parsed?.message ||
+      parsed?.detail ||
+      fallback,
+    );
+  } catch {
+    return trimmed.length <= 500 ? trimmed : fallback;
+  }
 }

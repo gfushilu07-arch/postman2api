@@ -19,5 +19,5 @@
     }
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["node_modules", "dashboard", "scripts/auth/.venv"]
+  "exclude": ["node_modules", "dashboard"]
 }
