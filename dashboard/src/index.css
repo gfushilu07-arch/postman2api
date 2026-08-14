@@ -51,7 +51,8 @@ button{cursor:pointer}
 .stat-num{font-size:22px;font-weight:600;line-height:1;letter-spacing:-.02em;margin-top:auto}
 
 .table-card{background:#fff;border-radius:14px;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch}
-.table-card>table{width:max-content;min-width:100%;border-collapse:collapse}
+.accounts-table-card{max-height:700px;overflow:auto}
+.accounts-table-card thead th{position:sticky;top:0;z-index:1}.table-card>table{width:max-content;min-width:100%;border-collapse:collapse}
 table{width:100%;border-collapse:collapse}
 th{background:#fff;font-size:11px;font-weight:500;color:#9b9b9b;padding:11px 16px;text-align:left;letter-spacing:.01em;white-space:nowrap}
 td{font-size:13px;padding:13px 16px;vertical-align:middle;color:#3f3f3f}

@@ -639,7 +639,7 @@ function AccountsTab({
         </div>
       )}
 
-      <div className="table-card">
+      <div className="table-card accounts-table-card">
         <table>
           <thead>
             <tr>
