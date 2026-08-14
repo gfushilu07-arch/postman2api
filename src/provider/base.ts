@@ -19,6 +19,7 @@ export interface ChatCompletionRequest {
   presence_penalty?: number;
   tools?: any[];
   tool_choice?: any;
+  parallel_tool_calls?: boolean;
   reasoning_effort?: string;
   thinking?: { type: string; budget_tokens?: number; display?: string; effort?: string; summary?: string };
   signal?: AbortSignal;

@@ -45,6 +45,76 @@ interface PostmanMCPTool {
   parameters: Record<string, unknown>;
 }
 
+export interface NormalizedPostmanTool extends PostmanMCPTool {}
+
+const EMPTY_TOOL_PARAMETERS: Record<string, unknown> = {
+  type: "object",
+  properties: {},
+};
+
+/**
+ * CC Switch normally converts Responses tools into Chat Completions
+ * `{ type: "function", function: ... }` objects. Keep this boundary tolerant:
+ * some versions preserve `input_schema`, top-level names, or namespace-shaped
+ * tools. Postman's gateway only needs a stable MCP-like name/description/schema.
+ */
+export function normalizePostmanTools(tools?: unknown[]): NormalizedPostmanTool[] {
+  if (!Array.isArray(tools) || tools.length === 0) return [];
+
+  const normalized: NormalizedPostmanTool[] = [];
+  const seenNames = new Set<string>();
+
+  const visit = (tool: any, namespace?: string) => {
+    if (!tool || typeof tool !== "object") return;
+
+    const nested = Array.isArray(tool.tools)
+      ? tool.tools
+      : Array.isArray(tool.functions)
+        ? tool.functions
+        : undefined;
+    if (nested) {
+      const nestedNamespace = namespace
+        ? `${namespace}.${safeToolName(tool.name)}`
+        : safeToolName(tool.name);
+      for (const child of nested) visit(child, nestedNamespace || namespace);
+      return;
+    }
+
+    const functionDefinition = tool.function && typeof tool.function === "object"
+      ? tool.function
+      : tool;
+    const rawName = firstNonEmptyString(
+      functionDefinition.name,
+      tool.name,
+      tool.function_name,
+    );
+    if (!rawName) return;
+
+    const name = namespace && !rawName.includes(".")
+      ? `${namespace}.${rawName}`
+      : rawName;
+    if (seenNames.has(name)) return;
+
+    const rawParameters =
+      functionDefinition.parameters
+      ?? functionDefinition.input_schema
+      ?? tool.parameters
+      ?? tool.input_schema;
+    const parameters = normalizeToolParameters(rawParameters);
+    const description = firstNonEmptyString(
+      functionDefinition.description,
+      tool.description,
+      name,
+    ) || name;
+
+    seenNames.add(name);
+    normalized.push({ name, description, parameters });
+  };
+
+  for (const tool of tools) visit(tool);
+  return normalized;
+}
+
 export class PostmanProvider extends BaseProvider {
   name = "postman" as const;
   override nativeFormat: "openai" | "anthropic" = "openai";
@@ -107,17 +177,7 @@ export class PostmanProvider extends BaseProvider {
   }
 
   private buildThirdPartyTools(tools?: any[]): Record<string, { tools: PostmanMCPTool[] }> {
-    if (!Array.isArray(tools) || tools.length === 0) return {};
-    const mcpTools: PostmanMCPTool[] = [];
-    for (const tool of tools) {
-      if (tool?.type !== "function" || !tool.function) continue;
-      const fn = tool.function;
-      mcpTools.push({
-        name: fn.name,
-        description: fn.description || fn.name,
-        parameters: fn.parameters || { type: "object", properties: {} },
-      });
-    }
+    const mcpTools = normalizePostmanTools(tools);
     if (mcpTools.length === 0) return {};
     return { "proxy-tools": { tools: mcpTools } };
   }
@@ -199,8 +259,8 @@ export class PostmanProvider extends BaseProvider {
         if (msg.tool_calls?.length) {
           const tcSummary = msg.tool_calls
             .map((tc: any) => {
-              const name = tc.function?.name || "unknown";
-              const args = tc.function?.arguments || "{}";
+              const name = tc.function?.name || tc.name || "unknown";
+              const args = stringifyToolArguments(tc.function?.arguments ?? tc.arguments) || "{}";
               return `Tool call: ${name}(${args}) [id=${tc.id || "unknown"}]`;
             })
             .join("\n");
@@ -282,7 +342,7 @@ export class PostmanProvider extends BaseProvider {
       devModeOptions: {
         selectedModel: postmanModel,
         isParallelToolCallingSupported: true,
-        autoRun: hasTools,
+        autoRun: hasTools && !isToolChoiceNone(request.tool_choice),
         supportsAskUser: false,
         supportsActionRecommendations: true,
         useThinkingModeIfAvailable: true,
@@ -892,6 +952,59 @@ function firstBoolean(...values: unknown[]): boolean | undefined {
     }
   }
   return undefined;
+}
+
+function firstNonEmptyString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const normalized = value.trim();
+    if (normalized) return normalized;
+  }
+  return undefined;
+}
+
+function safeToolName(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeToolParameters(value: unknown): Record<string, unknown> {
+  let parsed = value;
+  if (typeof parsed === "string") {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch {
+      parsed = undefined;
+    }
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { ...EMPTY_TOOL_PARAMETERS };
+  }
+
+  const schema = { ...(parsed as Record<string, unknown>) };
+  if (!schema.type) schema.type = "object";
+  if (schema.type === "object" && (!schema.properties || typeof schema.properties !== "object")) {
+    schema.properties = {};
+  }
+  return schema;
+}
+
+function stringifyToolArguments(value: unknown): string {
+  if (value === undefined || value === null || value === "") return "";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value) || "";
+  } catch {
+    return String(value);
+  }
+}
+
+function isToolChoiceNone(value: unknown): boolean {
+  if (value === "none") return true;
+  return Boolean(
+    value
+    && typeof value === "object"
+    && String((value as Record<string, unknown>).type || "").toLowerCase() === "none",
+  );
 }
 
 function extractQuotaApiError(text: string): string {
