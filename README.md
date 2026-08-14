@@ -86,6 +86,8 @@ cp .env.example .env
 
 ### 3. 构建并启动
 
+正式运行使用 `PORT`（默认 `1930`），只读取已经构建好的 `dashboard/dist`：
+
 ```bash
 bun run build
 bun run migrate
@@ -101,6 +103,22 @@ bun start
 | 模型列表 | `http://localhost:1930/v1/models` |
 | OpenAI 聊天补全 | `http://localhost:1930/v1/chat/completions` |
 | Anthropic 消息 | `http://localhost:1930/v1/messages` |
+
+### 开发模式
+
+开发模式和正式运行使用不同端口，避免开发时占用或修改正式运行的面板：
+
+```bash
+bun run dev
+```
+
+开发模式会同时启动：
+
+- 开发面板：`http://localhost:1931/`（Vite，不会写入 `dashboard/dist`）
+- 开发 API：`http://localhost:1932/`
+- 正式运行：`http://localhost:1930/`，由构建后的 `dashboard/dist` 提供
+
+修改前端代码后直接访问 `1931` 查看效果；需要测试正式版本时执行 `bun run build && bun start`，访问 `1930`。
 
 ## 主服务：连接账号
 
@@ -203,7 +221,8 @@ curl http://localhost:1930/v1/models \
 | 变量 | 示例/默认值 | 说明 |
 | --- | --- | --- |
 | `PORT` | `1930` | HTTP 服务与管理面板端口。 |
-| `DASHBOARD_PORT` | `1931` | 面板开发端口；生产资源由 `PORT` 提供。 |
+| `DASHBOARD_PORT` | `1931` | 开发面板端口；生产资源由 `PORT` 提供。 |
+| `DEV_API_PORT` | `1932` | 开发模式后端 API 端口，与正式运行的 `PORT` 分离。 |
 | `API_KEY` | 示例值 | `/v1/*` 接口鉴权密钥。 |
 | `ENCRYPTION_KEY` | 示例值 | 敏感账号信息加密密钥，必须替换为强随机值。 |
 | `DATABASE_PATH` | `./data/postman2api.db` | SQLite 数据库路径。 |
@@ -368,10 +387,16 @@ packages/postman-register/tokens/postman-token-YYYYMMDD-HHMMSS-SSS.json
 主服务命令均在仓库根目录执行：
 
 ```bash
-# 自动重载运行 API
+# 启动开发面板和开发 API（面板 1931，API 1932）
 bun run dev
 
-# 构建管理面板
+# 仅启动开发 API
+bun run dev:api
+
+# 仅启动开发面板
+bun run dev:dashboard
+
+# 构建管理面板（正式运行使用 1930）
 bun run build
 
 # 执行数据库迁移

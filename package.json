@@ -4,7 +4,9 @@
   "type": "module",
   "scripts": {
     "start": "bun src/index.ts",
-    "dev": "bun --watch src/index.ts",
+    "dev": "bun scripts/dev.ts",
+    "dev:api": "bun scripts/dev-api.ts",
+    "dev:dashboard": "cd dashboard && bun run dev",
     "migrate": "bun src/db/migrate.ts",
     "build": "cd dashboard && bun run build",
     "typecheck": "bunx tsc --noEmit",
