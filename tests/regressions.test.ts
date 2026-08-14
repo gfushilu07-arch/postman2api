@@ -462,6 +462,76 @@ describe("quota health", () => {
     }
   });
 
+  test("warmup initializes a new workspace before retrying quota", async () => {
+    const email = `warmup-quota-init-${crypto.randomUUID()}@example.com`;
+    const [created] = await db.insert(accounts).values({
+      email,
+      password: "unused",
+      status: "active",
+      enabled: true,
+      tokens: account.tokens,
+    }).returning();
+    const providerPrototype = PostmanProvider.prototype as any;
+    const originals = {
+      healthCheck: providerPrototype.healthCheck,
+      chatCompletion: providerPrototype.chatCompletion,
+    };
+    let healthChecks = 0;
+    let initializationRequest: any;
+
+    try {
+      providerPrototype.healthCheck = async () => {
+        healthChecks++;
+        if (healthChecks === 1) {
+          return {
+            kind: "transient_error",
+            success: false,
+            retryable: true,
+            error: "Quota response did not contain a remaining balance",
+          };
+        }
+        return {
+          kind: "healthy",
+          success: true,
+          quota: { limit: 800, used: 1, remaining: 799 },
+        };
+      };
+      providerPrototype.chatCompletion = async (_account: any, request: any) => {
+        initializationRequest = request;
+        return {
+          success: true,
+          response: {
+            id: "quota-init",
+            object: "chat.completion",
+            created: 0,
+            model: request.model,
+            choices: [{
+              index: 0,
+              message: { role: "assistant", content: "OK" },
+              finish_reason: "stop",
+            }],
+          },
+        };
+      };
+
+      const result = await warmupAccount(created!.id);
+      const [current] = await db.select().from(accounts).where(eq(accounts.id, created!.id));
+
+      expect(result).toEqual({ success: true });
+      expect(healthChecks).toBe(2);
+      expect(initializationRequest.model).toBe("auto");
+      expect(initializationRequest.max_tokens).toBe(8);
+      expect(current!.quotaLimit).toBe(800);
+      expect(current!.quotaRemaining).toBe(799);
+      expect(current!.errorMessage).toBeNull();
+      expect((pool as any).getInFlightCount(created!.id)).toBe(0);
+    } finally {
+      providerPrototype.healthCheck = originals.healthCheck;
+      providerPrototype.chatCompletion = originals.chatCompletion;
+      await db.delete(accounts).where(eq(accounts.id, created!.id));
+    }
+  });
+
   test("warmup cannot overwrite an exhausted transition with stale positive quota", async () => {
     const email = `warmup-race-${crypto.randomUUID()}@example.com`;
     const [created] = await db.insert(accounts).values({

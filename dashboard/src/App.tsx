@@ -498,8 +498,19 @@ function AccountsTab({
         <div className="page-actions">
           <span className="live-dot">实时监控</span>
           <button className="page-action-btn" onClick={() => { accounts.forEach(a => warmupAccount(a.id)); setTimeout(() => load(), 3000); }}>
-            <svg width="14" height="14" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><path d="M20 11a8 8 0 0 0-14.6-4.6"/><path d="M4 4v5h5"/><path d="M4 13a8 8 0 0 0 14.6 4.6"/><path d="M20 20v-5h-5"/></svg>
+            <svg width="14" height="14" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" fill="none"><path d="M20 11a8 8 0 0 0-14.6-4.6"/><path d="M4 4v5h5"/><path d="M4 13a8 8 0 0 0 14.6 4.6"/><path d="M20 20v-5h-5"/></svg>
             刷新额度
+          </button>
+          <button
+            className="page-action-btn"
+            disabled={selected.size === 0 || batchBusy}
+            title={selected.size === 0 ? "请先勾选需要测试的账号" : `测试已选中的 ${selected.size} 个账号`}
+            onClick={doBatchTest}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" fill="none">
+              <path d="M5 12.5 9.2 17 19 7" />
+            </svg>
+            {selected.size > 0 ? `批量测试 (${selected.size})` : "批量测试"}
           </button>
           <button className="page-action-btn page-action-btn-primary" onClick={() => setShowAdd(true)}>
             <svg width="14" height="14" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5" fill="none">
@@ -856,6 +867,26 @@ function AddAccountModal({
     return records;
   };
 
+  const initializeImportedAccounts = async (accountIds: number[]) => {
+    if (accountIds.length === 0) return;
+
+    let failed = 0;
+    for (const accountId of accountIds) {
+      try {
+        await warmupAccount(accountId);
+      } catch {
+        failed++;
+      }
+    }
+    onRefresh();
+    showToast(
+      failed === 0
+        ? `已自动初始化 ${accountIds.length} 个账号的额度`
+        : `额度初始化完成：成功 ${accountIds.length - failed}，失败 ${failed}`,
+      failed === 0 ? "success" : "error",
+    );
+  };
+
   const submit = async () => {
     setLoading(true);
     try {
@@ -887,8 +918,12 @@ function AddAccountModal({
         const result = await importAccounts(payload);
         setImportResult(result);
         onRefresh();
+        const importedAccountIds = [...new Set(result.results
+          .filter((item) => item.status !== "failed" && item.accountId !== undefined)
+          .map((item) => item.accountId!))];
+        void initializeImportedAccounts(importedAccountIds);
         const summary = `创建 ${result.summary.created}，更新 ${result.summary.updated}，失败 ${result.summary.failed}`;
-        showToast(`导入完成：${summary}`, result.summary.failed ? "error" : "success");
+        showToast(`导入完成：${summary}。正在后台初始化额度`, result.summary.failed ? "error" : "success");
         return;
       }
       onDone();
@@ -1011,7 +1046,7 @@ function AddAccountModal({
                 )}
               </div>
               <div className="dialog-help">
-                粘贴版本化账号 JSON，或选择多个 Token 文件批量导入。相同邮箱会更新 Token，不会重复创建。
+                粘贴版本化账号 JSON，或选择多个 Token 文件批量导入。相同邮箱会更新 Token，不会重复创建。导入后会自动发送一次最小测试请求来初始化额度，会消耗少量 AI 额度。
               </div>
               <textarea
                 className="input import-textarea"

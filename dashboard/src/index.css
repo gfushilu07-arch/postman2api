@@ -31,6 +31,8 @@ button{cursor:pointer}
 .page-actions{display:flex;gap:8px;align-items:center}
 .page-action-btn{height:34px;padding:0 14px;border-radius:999px;display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:600;border:1px solid #e6e6e6;background:#fafafa;color:#444;transition:background .15s,border-color .15s;cursor:pointer}
 .page-action-btn:hover{background:#f3f3f3;border-color:#dcdcdc}
+.page-action-btn:disabled{cursor:not-allowed;opacity:.5}
+.page-action-btn:disabled:hover{background:#fafafa;border-color:#e6e6e6}
 .page-action-btn svg{stroke:currentColor;fill:none}
 .page-action-btn-primary{background:#111;border-color:#111;color:#fff}
 .page-action-btn-primary:hover{background:#222;border-color:#222}
@@ -140,23 +142,26 @@ tr:hover td{background:#fdfdfd}
 textarea.input{height:auto;padding:10px 12px;resize:vertical}
 select.input{cursor:pointer;padding-right:28px;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23999' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 8px center}
 
-.modal.import-modal{width:min(640px,calc(100vw - 32px))}
-.import-section{display:grid;gap:10px}
+.modal.import-modal{width:min(640px,calc(100vw - 32px));max-height:calc(100dvh - 32px);display:flex;flex-direction:column;overflow:hidden}
+.import-modal .modal-title,.import-modal>.filter-bar,.import-modal>.dialog-actions{flex:0 0 auto}
+.import-modal .dialog-body{min-height:0;overflow-y:auto;padding-right:4px;margin-right:-4px}
+.import-modal>.dialog-actions{margin-top:14px;padding-top:14px;border-top:1px solid var(--border)}
+.import-section{display:grid;gap:10px;min-height:0}
 .import-files-wrap{display:grid;gap:8px}
 .import-file-picker{display:flex;align-items:center;justify-content:center;gap:8px;height:48px;border:1.5px dashed #d5d5d5;border-radius:8px;background:var(--bg-card);color:#315e9b;font-size:13px;font-weight:600;cursor:pointer;transition:border-color .15s,background .15s}
 .import-file-picker:hover{border-color:#a3c1ea;background:#f7fafc}
 .import-file-input{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden;pointer-events:none}
-.import-file-list{display:flex;flex-wrap:wrap;gap:6px}
+.import-file-list{display:flex;flex-wrap:wrap;align-content:flex-start;gap:6px;max-height:84px;overflow:auto;padding-right:3px}
 .import-file-chip{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:7px;background:#f1ece2;color:#6a6459;font-size:12px;font-weight:500;max-width:100%}
 .import-file-chip>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .import-file-remove{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:999px;background:rgba(0,0,0,.08);color:#6a6459;padding:0;flex:0 0 auto}
 .import-file-remove:hover{background:rgba(0,0,0,.16)}
-.import-textarea{min-height:280px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;line-height:1.55}
+.import-textarea{min-height:168px;max-height:220px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;line-height:1.55}
 .import-doc-link{width:fit-content;color:#315e9b;font-size:12px;text-decoration:none}
 .import-doc-link:hover{text-decoration:underline}
 .import-result{overflow:hidden;border:1px solid var(--border);border-radius:8px;background:var(--bg-card)}
 .import-result-summary{padding:9px 11px;border-bottom:1px solid var(--border);font-size:12px;font-weight:600}
-.import-result-list{max-height:160px;overflow:auto}
+.import-result-list{max-height:min(160px,22dvh);overflow:auto}
 .import-result-row{display:flex;justify-content:space-between;gap:12px;padding:8px 11px;font-size:12px}
 .import-result-row+.import-result-row{border-top:1px solid var(--border)}
 .import-result-row.is-created span:last-child,.import-result-row.is-updated span:last-child{color:#18794e}

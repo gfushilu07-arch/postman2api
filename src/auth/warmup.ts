@@ -1,7 +1,8 @@
 import { db } from "../db/index";
-import { accounts } from "../db/schema";
+import { accounts, type Account } from "../db/schema";
 import { and, eq, isNull } from "drizzle-orm";
 import { PostmanProvider } from "../provider/postman";
+import type { ProviderHealthResult, ProviderResult } from "../provider/base";
 import { pool } from "../proxy/pool";
 import { broadcast } from "../ws/index";
 import { resolveWarmupStatus } from "./health-status";
@@ -9,14 +10,91 @@ import { resolveWarmupStatus } from "./health-status";
 const provider = new PostmanProvider();
 const WARMUP_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 const PROVISIONING_RETRY_DELAYS_MS = [15_000, 30_000, 60_000];
+const QUOTA_INITIALIZATION_ERROR = "Quota response did not contain a remaining balance";
+const QUOTA_INITIALIZATION_PROMPT = "请只回复 OK，不要添加其他内容。";
+const QUOTA_INITIALIZATION_TIMEOUT_MS = 60_000;
+const QUOTA_INITIALIZATION_COOLDOWN_MS = 5 * 60 * 1000;
+const QUOTA_REFRESH_RETRY_DELAYS_MS = [0, 500, 1_500];
 let warmupTimer: ReturnType<typeof setInterval> | null = null;
 const provisioningRetryTimers = new Map<number, ReturnType<typeof setTimeout>>();
+const quotaInitializationInFlight = new Map<number, Promise<ProviderResult>>();
+const quotaInitializationCompletedAt = new Map<number, number>();
+
+function requiresQuotaInitialization(health: ProviderHealthResult): boolean {
+  return !health.success && health.error === QUOTA_INITIALIZATION_ERROR;
+}
+
+async function sendQuotaInitializationProbe(account: Account): Promise<ProviderResult> {
+  const current = quotaInitializationInFlight.get(account.id);
+  if (current) return current;
+
+  const lastCompletedAt = quotaInitializationCompletedAt.get(account.id) ?? 0;
+  if (Date.now() - lastCompletedAt < QUOTA_INITIALIZATION_COOLDOWN_MS) {
+    return { success: true };
+  }
+
+  const request = (async () => {
+    const leaseId = pool.trackRequestStart(account.id);
+    try {
+      const result = await provider.chatCompletion(account, {
+        model: "auto",
+        messages: [{ role: "user", content: QUOTA_INITIALIZATION_PROMPT }],
+        temperature: 0,
+        max_tokens: 8,
+        signal: AbortSignal.timeout(QUOTA_INITIALIZATION_TIMEOUT_MS),
+      });
+      if (result.success) quotaInitializationCompletedAt.set(account.id, Date.now());
+      return result;
+    } finally {
+      pool.trackRequestEnd(account.id, leaseId);
+    }
+  })();
+
+  quotaInitializationInFlight.set(account.id, request);
+  try {
+    return await request;
+  } finally {
+    quotaInitializationInFlight.delete(account.id);
+  }
+}
+
+async function refreshHealthAfterQuotaInitialization(account: Account): Promise<ProviderHealthResult> {
+  let health: ProviderHealthResult = {
+    kind: "transient_error",
+    success: false,
+    retryable: true,
+    error: QUOTA_INITIALIZATION_ERROR,
+  };
+
+  for (const delay of QUOTA_REFRESH_RETRY_DELAYS_MS) {
+    if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+    health = await provider.healthCheck(account);
+    if (!requiresQuotaInitialization(health)) break;
+  }
+  return health;
+}
 
 export async function warmupAccount(accountId: number): Promise<{ success: boolean; error?: string }> {
   const [account] = await db.select().from(accounts).where(eq(accounts.id, accountId)).limit(1);
   if (!account) return { success: false, error: "Account not found" };
 
-  const health = await provider.healthCheck(account);
+  let health = await provider.healthCheck(account);
+  if (requiresQuotaInitialization(health)) {
+    // 新工作区的额度实体通常要在首次真实 AI 请求后才会创建。
+    const initialization = await sendQuotaInitializationProbe(account);
+    if (initialization.success) {
+      health = await refreshHealthAfterQuotaInitialization(account);
+    } else if (initialization.quotaExhausted) {
+      health = { kind: "exhausted", success: true, error: initialization.error };
+    } else {
+      health = {
+        kind: "transient_error",
+        success: false,
+        retryable: initialization.retryable || initialization.rateLimited || undefined,
+        error: initialization.error || "Postman AI 额度初始化失败",
+      };
+    }
+  }
   if (!health.success) {
     const nextStatus = health.kind === "transient_error" ? account.status : "error";
     const updated = await db.update(accounts)
@@ -131,4 +209,6 @@ export function stopWarmupScheduler(): void {
   }
   for (const timer of provisioningRetryTimers.values()) clearTimeout(timer);
   provisioningRetryTimers.clear();
+  quotaInitializationInFlight.clear();
+  quotaInitializationCompletedAt.clear();
 }
