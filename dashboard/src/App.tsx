@@ -649,6 +649,7 @@ function AccountsTab({
             ) : (
               filtered.map((a) => {
                 const displayStatus = getAccountDisplayStatus(a);
+                const isDisabled = !a.enabled;
                 const isWarming = warming.has(a.id);
                 const isTesting = testing.has(a.id);
                 const testResult = testResults[a.id];
