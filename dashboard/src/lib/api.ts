@@ -124,7 +124,7 @@ export async function deleteAccount(id: number): Promise<{ success: boolean }> {
   return api(`/api/accounts/${id}`, { method: "DELETE" });
 }
 
-export async function warmupAccount(id: number): Promise<{ success: boolean; error?: string; account: Account }> {
+export async function warmupAccount(id: number): Promise<{ success: boolean; error?: string; pending?: boolean; account: Account }> {
   return api(`/api/accounts/${id}/warmup`, { method: "POST" });
 }
 

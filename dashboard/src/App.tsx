@@ -330,7 +330,8 @@ function AccountsTab({
     try {
       const res = await warmupAccount(id);
       setAccounts((current) => current.map((account) => account.id === id ? res.account : account));
-      if (res.success) showToast("额度刷新成功", "success");
+      if (res.pending) showToast(res.error || "额度正在初始化，系统会在后台自动重试", "info");
+      else if (res.success) showToast("额度刷新成功", "success");
       else showToast(res.error || "额度刷新失败", "error");
     } catch (e: any) {
       showToast("额度刷新失败：" + e.message, "error");
@@ -413,12 +414,14 @@ function AccountsTab({
       return n;
     });
     let ok = 0;
+    let pending = 0;
     let failed = 0;
     for (const id of ids) {
       try {
         const res = await warmupAccount(id);
         setAccounts((current) => current.map((account) => account.id === id ? res.account : account));
-        if (res.success) ok++;
+        if (res.pending) pending++;
+        else if (res.success) ok++;
         else failed++;
       } catch {
         failed++;
@@ -430,8 +433,9 @@ function AccountsTab({
       return n;
     });
     showToast(ids.length === 1
-      ? (failed === 0 ? "额度刷新成功" : "额度刷新失败")
-      : `批量刷新完成：成功 ${ok}，失败 ${failed}`, failed === 0 ? "success" : "error");
+      ? (pending > 0 ? "额度正在初始化，系统会在后台自动重试" : failed === 0 ? "额度刷新成功" : "额度刷新失败")
+      : `批量刷新完成：成功 ${ok}，初始化中 ${pending}，失败 ${failed}`,
+    failed > 0 ? "error" : pending > 0 ? "info" : "success");
   };
 
   const doBatchTest = async () => {
@@ -870,20 +874,26 @@ function AddAccountModal({
   const initializeImportedAccounts = async (accountIds: number[]) => {
     if (accountIds.length === 0) return;
 
+    let ready = 0;
+    let pending = 0;
     let failed = 0;
     for (const accountId of accountIds) {
       try {
-        await warmupAccount(accountId);
+        const result = await warmupAccount(accountId);
+        if (result.pending) pending++;
+        else ready++;
       } catch {
         failed++;
       }
     }
     onRefresh();
     showToast(
-      failed === 0
-        ? `已自动初始化 ${accountIds.length} 个账号的额度`
-        : `额度初始化完成：成功 ${accountIds.length - failed}，失败 ${failed}`,
-      failed === 0 ? "success" : "error",
+      failed > 0
+        ? `额度初始化：已就绪 ${ready}，等待生成 ${pending}，失败 ${failed}`
+        : pending > 0
+          ? `已提交 ${pending} 个账号的额度初始化，系统会在后台自动重试`
+          : `已自动初始化 ${ready} 个账号的额度`,
+      failed > 0 ? "error" : pending > 0 ? "info" : "success",
     );
   };
 

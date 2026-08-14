@@ -520,7 +520,7 @@ describe("quota health", () => {
       expect(result).toEqual({ success: true });
       expect(healthChecks).toBe(2);
       expect(initializationRequest.model).toBe("auto");
-      expect(initializationRequest.max_tokens).toBe(8);
+      expect(initializationRequest.max_tokens).toBe(32);
       expect(current!.quotaLimit).toBe(800);
       expect(current!.quotaRemaining).toBe(799);
       expect(current!.errorMessage).toBeNull();

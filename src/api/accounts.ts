@@ -6,7 +6,7 @@ import { encrypt } from "../utils/crypto";
 import { loginPostmanAccount } from "../auth/bridge";
 import { clearSignupConfirmation, confirmSignupCompletion, prepareSignupConfirmation } from "../auth/postman-login";
 import { testAccountAvailability } from "../auth/account-test";
-import { warmupAccount } from "../auth/warmup";
+import { scheduleProvisioningWarmup, warmupAccount } from "../auth/warmup";
 import { acquireSignupTask, getActiveSignupTask, releaseSignupTask } from "../auth/signup-task";
 import { pool } from "../proxy/pool";
 import { broadcast } from "../ws/index";
@@ -321,6 +321,7 @@ export async function handleAccountWarmupRequest(
 ) {
   const id = Number(c.req.param("id"));
   const result = await warmup(id);
+  if (result.pending) scheduleProvisioningWarmup(id);
   const [account] = await db.select().from(accounts).where(eq(accounts.id, id)).limit(1);
   if (!account) return c.json({ success: false, error: "Account not found" }, 404);
   return c.json(

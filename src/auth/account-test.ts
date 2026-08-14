@@ -8,7 +8,8 @@ import { broadcast } from "../ws/index";
 export const ACCOUNT_TEST_MODEL = "auto";
 export const ACCOUNT_TEST_PROMPT = "请只回复字符串 POSTMAN2API_OK，不要调用工具，不要添加其他内容。";
 const EXPECTED_RESPONSE = "POSTMAN2API_OK";
-const ACCOUNT_TEST_TIMEOUT_MS = 60_000;
+export const ACCOUNT_TEST_TIMEOUT_MS = 60_000;
+export const ACCOUNT_TEST_MAX_TOKENS = 32;
 
 export type AccountTestLogLevel = "info" | "success" | "warn" | "error";
 
@@ -106,7 +107,7 @@ export async function testAccountAvailability(accountId: number): Promise<Accoun
       model: ACCOUNT_TEST_MODEL,
       messages: [{ role: "user", content: ACCOUNT_TEST_PROMPT }],
       temperature: 0,
-      max_tokens: 32,
+      max_tokens: ACCOUNT_TEST_MAX_TOKENS,
       signal: AbortSignal.timeout(ACCOUNT_TEST_TIMEOUT_MS),
     });
 
