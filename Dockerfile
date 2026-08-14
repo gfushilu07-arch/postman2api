@@ -1,16 +1,3 @@
-FROM oven/bun:1.3.14 AS dependencies
-WORKDIR /app
-
-COPY package.json bun.lock ./
-COPY dashboard/package.json dashboard/bun.lock ./dashboard/
-RUN bun install --frozen-lockfile --ignore-scripts
-RUN cd dashboard && bun install --frozen-lockfile
-
-FROM dependencies AS build
-COPY . .
-RUN cd dashboard && bunx vite build
-RUN bun build src/index.ts src/db/migrate.ts --outdir dist --target bun --packages external
-
 FROM oven/bun:1.3.14-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production \
@@ -19,9 +6,12 @@ ENV NODE_ENV=production \
 
 COPY package.json bun.lock ./
 RUN bun install --production --frozen-lockfile --ignore-scripts && bun pm cache rm
-COPY --from=build /app/dist ./dist
-COPY --from=build /app/dashboard/dist ./dashboard/dist
-COPY --from=build /app/docs ./docs
+
+# The host-side build step creates .docker-context as an immutable snapshot.
+# This image only copies that snapshot; it never compiles TypeScript or Vite.
+COPY .docker-context/server ./dist
+COPY .docker-context/dashboard ./dashboard/dist
+COPY .docker-context/docs ./docs
 
 RUN mkdir -p /data
 EXPOSE 1930

@@ -9,6 +9,13 @@ dist
 data
 tokens
 tokens copy
+.docker-context/*
+!.docker-context/server
+!.docker-context/server/**
+!.docker-context/dashboard
+!.docker-context/dashboard/**
+!.docker-context/docs
+!.docker-context/docs/**
 .env
 .env.*
 !.env.example

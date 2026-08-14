@@ -10,6 +10,7 @@ scripts/auth/app/__pycache__/
 dashboard/dist/
 dist/
 .releases/
+.docker-context/
 dashboard/dist
 dist
 dashboard/node_modules/

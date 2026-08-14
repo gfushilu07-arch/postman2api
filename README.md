@@ -126,12 +126,22 @@ bun run dev
 
 ### Docker 运行
 
-Docker 运行时会在镜像内完成前端和后端编译，容器启动时自动执行数据库迁移；
+Docker 镜像不会在容器内重新编译源码，而是复制宿主机已经完成的编译快照；
+镜像构建完成后，之后再次执行 `bun run build` 不会修改已经存在的容器。
+发布新版本时需要显式重新准备 Docker 快照。容器启动时会自动执行数据库迁移；
 SQLite 数据默认挂载到 `/data`，因此替换镜像不会丢失账号和统计数据：
 
 ```bash
-docker compose up -d --build
+bun run docker:build
+docker compose up -d
 docker compose logs -f postman2api
+```
+
+如果已经单独执行过 `bun run build`，也可以拆开执行：
+
+```bash
+bun run docker:prepare
+docker compose up -d --build
 ```
 
 默认镜像适合 API 和管理面板运行，不会下载登录浏览器。需要在容器内执行

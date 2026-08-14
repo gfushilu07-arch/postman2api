@@ -30,6 +30,9 @@ cleanup_preflight() {
 trap cleanup_preflight EXIT
 
 echo "[deploy] Building immutable image $IMAGE"
+echo "[deploy] Compiling host release snapshot"
+bun run build
+bun run docker:prepare
 docker build --target runtime -t "$IMAGE" .
 
 echo "[deploy] Running isolated health check"
