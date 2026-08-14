@@ -109,19 +109,42 @@ async function findTurnstileWidget(page: Page): Promise<{ frame: Frame; loc: Loc
   return null;
 }
 
-/** Turnstile 勾选框点击节流：避免高频轮询时重复点击 */
-let lastTurnstileClickAt = 0;
+export type TurnstileClickMode = "checkbox" | "container-center";
 
 /**
- * 自动点击交互式 Turnstile 勾选框（3 秒节流）。
- * invisible 模式没有可见组件时自动跳过；勾选框位于组件左侧，点击 iframe 左中部命中。
+ * 自动点击交互式 Turnstile（每个页面独立进行 3 秒节流）。
+ * 注册页可指定点击 #cloudflareTurnstile 容器正中心；其他页面沿用勾选框左中部点击。
+ * invisible 模式没有可见组件时自动跳过。
  */
-export async function clickTurnstileCheckbox(page: Page): Promise<void> {
+const lastTurnstileClickAt = new WeakMap<Page, number>();
+
+export async function clickTurnstileCheckbox(
+  page: Page,
+  mode: TurnstileClickMode = "checkbox",
+): Promise<void> {
   const now = Date.now();
-  if (now - lastTurnstileClickAt < 3000) return;
+  if (now - (lastTurnstileClickAt.get(page) ?? 0) < 3000) return;
+
+  if (mode === "container-center") {
+    for (const frame of [page.mainFrame(), ...page.frames()]) {
+      const container = frame.locator("#cloudflareTurnstile").first();
+      if ((await container.count().catch(() => 0)) === 0) continue;
+      await container.scrollIntoViewIfNeeded().catch(() => {});
+      const box = await container.boundingBox().catch(() => null);
+      if (!box || box.width <= 0 || box.height <= 0) continue;
+
+      lastTurnstileClickAt.set(page, now);
+      log.info("检测到 #cloudflareTurnstile，自动点击容器中心");
+      await page.mouse
+        .click(box.x + box.width / 2, box.y + box.height / 2)
+        .catch((err) => log.warn(`Turnstile 容器中心点击未完成：${err instanceof Error ? err.message : String(err)}`));
+      return;
+    }
+  }
+
   const widget = await findTurnstileWidget(page);
   if (!widget) return;
-  lastTurnstileClickAt = now;
+  lastTurnstileClickAt.set(page, now);
   const box = await widget.loc.boundingBox().catch(() => null);
   const position = box ? { x: Math.min(30, box.width / 4), y: box.height / 2 } : undefined;
   log.info("检测到交互式 Turnstile 勾选框，自动点击");
@@ -249,6 +272,7 @@ export async function waitForCloudflareSuccess(
   page: Page,
   timeout = CONFIG.timeouts.cfWait,
   validateCaptchaAbsent?: () => Promise<boolean>,
+  clickMode: TurnstileClickMode = "checkbox",
 ): Promise<void> {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
@@ -268,7 +292,7 @@ export async function waitForCloudflareSuccess(
       interval: 200, // 高频检测：绿色 Success! / token 生成都是转瞬即逝的状态
       label: "等待 Cloudflare 验证通过",
       onMiss: async () => {
-        await clickTurnstileCheckbox(page);
+        await clickTurnstileCheckbox(page, clickMode);
       },
     }).catch(() => null);
     await throwIfCaptchaFailure(page);

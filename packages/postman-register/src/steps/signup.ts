@@ -76,8 +76,14 @@ export async function runSignup(ctx: StepContext): Promise<void> {
     await fillField(tab, ps.usernameInputs(tab), plan.emailPrefix!, "用户名");
     await fillField(tab, ps.passwordInputs(tab), plan.password, "密码");
 
+    // 填完三项后，每隔 3 秒点击 #cloudflareTurnstile 容器中心，验证通过后立即停止。
     // CAPTCHA 不存在时仍必须验证当前注册页可正常提交；绝不把“组件不存在”当作验证成功。
-    await ps.waitForCloudflareSuccess(tab, CONFIG.timeouts.cfWait, () => ps.registrationFormReady(tab));
+    await ps.waitForCloudflareSuccess(
+      tab,
+      CONFIG.timeouts.cfWait,
+      () => ps.registrationFormReady(tab),
+      "container-center",
+    );
 
     const submit = await firstVisible(ps.registrationSubmitButtons(tab), CONFIG.timeouts.short);
     if (!submit) throw new Error("未找到正常的 Register / Create Free Account 提交按钮");
