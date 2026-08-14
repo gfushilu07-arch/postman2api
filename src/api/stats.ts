@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { db } from "../db/index";
-import { requestLogs, accounts } from "../db/schema";
+import { requestLogs, requestStatsTotals, accounts } from "../db/schema";
 import { desc, eq, sql } from "drizzle-orm";
 
 export const statsRouter = new Hono();
@@ -16,6 +16,8 @@ statsRouter.get("/", async (c) => {
     completion: sql<number>`COALESCE(SUM(completion_tokens), 0)`,
     total: sql<number>`COALESCE(SUM(total_tokens), 0)`,
   }).from(requestLogs);
+  const [archivedResult] = await db.select().from(requestStatsTotals)
+    .where(eq(requestStatsTotals.id, 1)).limit(1);
 
   const [accountCount] = await db.select({ count: sql<number>`count(*)` }).from(accounts);
   const [activeCount] = await db.select({ count: sql<number>`count(*)` })
@@ -46,12 +48,12 @@ statsRouter.get("/", async (c) => {
 
   return c.json({
     data: {
-      totalRequests: totalResult?.count || 0,
-      successRequests: successResult?.count || 0,
-      errorRequests: errorResult?.count || 0,
-      totalPromptTokens: tokenResult?.prompt || 0,
-      totalCompletionTokens: tokenResult?.completion || 0,
-      totalTokens: tokenResult?.total || 0,
+      totalRequests: (archivedResult?.totalRequests || 0) + (totalResult?.count || 0),
+      successRequests: (archivedResult?.successRequests || 0) + (successResult?.count || 0),
+      errorRequests: (archivedResult?.errorRequests || 0) + (errorResult?.count || 0),
+      totalPromptTokens: (archivedResult?.promptTokens || 0) + (tokenResult?.prompt || 0),
+      totalCompletionTokens: (archivedResult?.completionTokens || 0) + (tokenResult?.completion || 0),
+      totalTokens: (archivedResult?.totalTokens || 0) + (tokenResult?.total || 0),
       totalAccounts: accountCount?.count || 0,
       activeAccounts: activeCount?.count || 0,
       recentRequests: recent,

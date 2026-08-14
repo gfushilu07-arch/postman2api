@@ -13,6 +13,10 @@ function positiveNumber(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function positiveInteger(value: string | undefined, fallback: number): number {
+  return Math.max(1, Math.floor(positiveNumber(value, fallback)));
+}
+
 const streamReadTimeoutMs = positiveNumber(process.env.STREAM_READ_TIMEOUT_MS, 300_000);
 const providerRequestTimeoutMs = positiveNumber(process.env.PROVIDER_REQUEST_TIMEOUT_MS, 120_000);
 const quotaSafeStreamBufferBytes = positiveNumber(
@@ -21,6 +25,11 @@ const quotaSafeStreamBufferBytes = positiveNumber(
 );
 const streamKeepaliveIntervalMs = positiveNumber(process.env.STREAM_KEEPALIVE_INTERVAL_MS, 10_000);
 const postmanFetchVerbose = /^(1|true|yes)$/i.test(process.env.POSTMAN_FETCH_VERBOSE || "");
+const requestLogRetainCount = positiveInteger(process.env.REQUEST_LOG_RETAIN_COUNT, 50);
+const requestLogCleanupThreshold = Math.max(
+  requestLogRetainCount + 1,
+  positiveInteger(process.env.REQUEST_LOG_CLEANUP_THRESHOLD, 100),
+);
 
 export const config = {
   port: Number(process.env.PORT) || 1930,
@@ -33,6 +42,13 @@ export const config = {
   quotaSafeStreamBufferBytes,
   streamKeepaliveIntervalMs,
   postmanFetchVerbose,
+  requestLogRetainCount,
+  requestLogCleanupThreshold,
+  requestLogCleanupIntervalMs: positiveInteger(
+    process.env.REQUEST_LOG_CLEANUP_INTERVAL_MS,
+    10 * 60 * 1000,
+  ),
+  sessionRetentionDays: positiveInteger(process.env.SESSION_RETENTION_DAYS, 30),
   loginBrowserBackend: parseLoginBrowserBackend(process.env.LOGIN_BROWSER_BACKEND),
   // Bun.serve expects seconds and supports at most 255. Prefer the longer
   // provider/stream timeout, capped to Bun's supported range.

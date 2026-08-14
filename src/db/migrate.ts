@@ -60,6 +60,21 @@ async function migrate() {
     }
   }
 
+  await db.run(sql`CREATE TABLE IF NOT EXISTS request_stats_totals (
+    id INTEGER PRIMARY KEY,
+    total_requests INTEGER NOT NULL DEFAULT 0,
+    success_requests INTEGER NOT NULL DEFAULT 0,
+    error_requests INTEGER NOT NULL DEFAULT 0,
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL
+  )`);
+  await db.run(sql`INSERT OR IGNORE INTO request_stats_totals (
+    id, total_requests, success_requests, error_requests,
+    prompt_tokens, completion_tokens, total_tokens, updated_at
+  ) VALUES (1, 0, 0, 0, 0, 0, 0, ${Math.floor(Date.now() / 1000)})`);
+
   await db.run(sql`CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT,
@@ -83,7 +98,7 @@ async function migrate() {
 
   await db.run(sql`INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('admin_key', 'postman2api', ${Date.now()})`);
 
-  console.log("[migrate] Done. Tables created: accounts, request_logs, settings, session_states");
+  console.log("[migrate] Done. Tables created: accounts, request_logs, request_stats_totals, settings, session_states");
   client.close();
 }
 

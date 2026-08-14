@@ -43,6 +43,17 @@ export const requestLogs = sqliteTable("request_logs", {
   index("request_logs_account_idx").on(table.accountId),
 ]);
 
+export const requestStatsTotals = sqliteTable("request_stats_totals", {
+  id: integer("id").primaryKey(),
+  totalRequests: integer("total_requests").notNull().default(0),
+  successRequests: integer("success_requests").notNull().default(0),
+  errorRequests: integer("error_requests").notNull().default(0),
+  promptTokens: integer("prompt_tokens").notNull().default(0),
+  completionTokens: integer("completion_tokens").notNull().default(0),
+  totalTokens: integer("total_tokens").notNull().default(0),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+});
+
 export const settings = sqliteTable("settings", {
   key: text("key").primaryKey(),
   value: text("value"),
@@ -65,4 +76,5 @@ export type Account = typeof accounts.$inferSelect;
 export type NewAccount = typeof accounts.$inferInsert;
 export type RequestLog = typeof requestLogs.$inferSelect;
 export type NewRequestLog = typeof requestLogs.$inferInsert;
+export type RequestStatsTotal = typeof requestStatsTotals.$inferSelect;
 export type SessionState = typeof sessionStates.$inferSelect;

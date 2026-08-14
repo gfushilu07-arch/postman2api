@@ -13,6 +13,7 @@ import { settings } from "./db/schema";
 import { eq } from "drizzle-orm";
 import { isDefaultEncryptionKey } from "./utils/crypto";
 import { acceptsApiKey } from "./auth/api-key";
+import { startRetentionScheduler, stopRetentionScheduler } from "./db/retention";
 
 const app = new Hono();
 
@@ -93,6 +94,7 @@ const server = Bun.serve({
 
 // Start warmup scheduler
 startWarmupScheduler();
+startRetentionScheduler();
 
 if (isDefaultEncryptionKey()) {
   console.warn("[postman2api] WARNING: Using default encryption key. Set ENCRYPTION_KEY in .env!");
@@ -106,6 +108,7 @@ console.log(`[postman2api] WebSocket: ws://localhost:${config.port}/ws`);
 
 process.on("SIGTERM", () => {
   stopWarmupScheduler();
+  stopRetentionScheduler();
   server.stop();
 });
 

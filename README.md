@@ -253,6 +253,10 @@ curl http://localhost:1930/v1/models \
 | `API_KEY` | 示例值 | `/v1/*` 接口鉴权密钥。 |
 | `ENCRYPTION_KEY` | 示例值 | 敏感账号信息加密密钥，必须替换为强随机值。 |
 | `DATABASE_PATH` | `./data/postman2api.db` | SQLite 数据库路径。 |
+| `REQUEST_LOG_RETAIN_COUNT` | `50` | 请求详情批量清理后保留的最近记录数。 |
+| `REQUEST_LOG_CLEANUP_THRESHOLD` | `100` | 请求详情达到该数量后触发批量清理。 |
+| `REQUEST_LOG_CLEANUP_INTERVAL_MS` | `600000` | 请求详情与过期会话检查周期，默认 10 分钟。 |
+| `SESSION_RETENTION_DAYS` | `30` | 会话上下文允许的最长闲置天数。 |
 | `TTFB_TIMEOUT_MS` | `45000` | 等待上游响应头的最长时间。 |
 | `STREAM_READ_TIMEOUT_MS` | `300000` | 流式响应分块之间的最大空闲时间。 |
 | `PROVIDER_REQUEST_TIMEOUT_MS` | `120000` | 未单独设置首包超时时的提供商请求兜底超时。 |
@@ -263,6 +267,10 @@ curl http://localhost:1930/v1/models \
 | `LOGIN_BROWSER_BACKEND` | `camoufox` | 登录后端，可选 `camoufox` 或 `playwright`。 |
 
 管理面板中的设置会存储在 SQLite 中，并覆盖对应环境变量的默认值。
+
+请求详情采用高低水位批量清理：默认超过 100 条时一次清理到最近 50 条，
+累计请求数和 Token 会先归档到汇总表，因此统计概览不会随详情删除而下降。
+SQLite 删除后的页面会继续复用，程序不会在定时任务中频繁执行 `VACUUM`。
 
 如需使用 Playwright Chromium 登录：
 
