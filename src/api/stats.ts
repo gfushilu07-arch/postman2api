@@ -6,6 +6,7 @@ import { desc, eq, sql } from "drizzle-orm";
 export const statsRouter = new Hono();
 
 statsRouter.get("/", async (c) => {
+  const requestSearch = (c.req.query("q") || "").trim().slice(0, 200);
   const [totalResult] = await db.select({ count: sql<number>`count(*)` }).from(requestLogs);
   const [successResult] = await db.select({ count: sql<number>`count(*)` })
     .from(requestLogs).where(sql`status = 'success'`);
@@ -23,7 +24,19 @@ statsRouter.get("/", async (c) => {
   const [activeCount] = await db.select({ count: sql<number>`count(*)` })
     .from(accounts).where(sql`status = 'active' AND enabled = 1`);
 
-  // Recent requests (last 50)
+  // Search only within the latest 50 retained request details. The large
+  // message snapshots stay in SQLite and are not returned in the list API.
+  const recentRequestScope = sql`${requestLogs.id} IN (
+    SELECT id FROM request_logs ORDER BY created_at DESC, id DESC LIMIT 50
+  )`;
+  const detailSearch = requestSearch
+    ? sql`(
+        instr(lower(COALESCE(${requestLogs.requestMessages}, '')), lower(${requestSearch})) > 0
+        OR instr(lower(COALESCE(${requestLogs.responseMessage}, '')), lower(${requestSearch})) > 0
+        OR instr(lower(COALESCE(${requestLogs.errorMessage}, '')), lower(${requestSearch})) > 0
+      )`
+    : sql`1 = 1`;
+
   const recent = await db.select({
     id: requestLogs.id,
     accountId: requestLogs.accountId,
@@ -43,7 +56,8 @@ statsRouter.get("/", async (c) => {
   })
     .from(requestLogs)
     .leftJoin(accounts, eq(requestLogs.accountId, accounts.id))
-    .orderBy(desc(requestLogs.createdAt))
+    .where(sql`${recentRequestScope} AND ${detailSearch}`)
+    .orderBy(desc(requestLogs.createdAt), desc(requestLogs.id))
     .limit(50);
 
   return c.json({
@@ -56,6 +70,7 @@ statsRouter.get("/", async (c) => {
       totalTokens: (archivedResult?.totalTokens || 0) + (tokenResult?.total || 0),
       totalAccounts: accountCount?.count || 0,
       activeAccounts: activeCount?.count || 0,
+      recentRequestTotal: Math.min(50, totalResult?.count || 0),
       recentRequests: recent,
     },
   });

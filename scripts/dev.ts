@@ -6,6 +6,7 @@ const apiEnv = Object.fromEntries(
   Object.entries(Bun.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
 );
 apiEnv.PORT = devApiPort;
+apiEnv.NODE_ENV = "development";
 
 const api = Bun.spawn(["bun", "--watch", "src/index.ts"], {
   cwd: rootDir,

@@ -53,8 +53,20 @@ button{cursor:pointer}
 .table-card{background:#fff;border-radius:14px;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch}
 .accounts-table-card{max-height:700px;overflow:auto}
 .accounts-table-card thead th{position:sticky;top:0;z-index:1}.table-card>table{width:max-content;min-width:100%;border-collapse:collapse}
+.stats-table-card{max-height:700px;overflow:auto}
 .stats-table-card table{min-width:1080px}
+.stats-table-card thead th{position:sticky;top:0;z-index:1}
 .stats-account-cell{max-width:210px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.stats-search-toolbar{display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap}
+.stats-search{height:36px;min-width:min(440px,100%);flex:1;display:flex;align-items:center;gap:8px;padding:0 10px;border:1px solid var(--border);border-radius:9px;background:#fff;color:#888}
+.stats-search:focus-within{border-color:#bbb;box-shadow:0 0 0 2px rgba(0,0,0,.04)}
+.stats-search svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.8;flex:0 0 auto}
+.stats-search input{width:100%;min-width:0;font-size:13px}
+.stats-search input::placeholder{color:#aaa}
+.stats-search-clear{width:24px;height:24px;border-radius:6px;color:#999;font-size:18px;line-height:1;display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+.stats-search-clear:hover{background:#f3f3f3;color:#555}
+.stats-search-meta{font-size:11px;color:#999}
+.stats-search-empty{padding:36px 16px;border-radius:12px;background:#fff;color:#999;font-size:13px;text-align:center}
 .stats-request-row{cursor:pointer}
 .stats-request-row:focus-visible td{background:#f7f2e8;outline:none}
 .stats-model-cell{display:grid;gap:4px;min-width:150px}

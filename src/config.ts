@@ -2,6 +2,11 @@ import path from "node:path";
 import { parseLoginBrowserBackend } from "./auth/browser-launcher";
 
 const projectRoot = path.resolve(import.meta.dir, "..");
+const runtimeEnvironment = process.env.NODE_ENV === "production"
+  ? "production"
+  : process.env.NODE_ENV === "test"
+    ? "test"
+    : "development";
 
 function resolveFromRoot(value: string | undefined, fallback: string): string {
   const raw = value && value.length > 0 ? value : fallback;
@@ -30,12 +35,28 @@ const requestLogCleanupThreshold = Math.max(
   requestLogRetainCount + 1,
   positiveInteger(process.env.REQUEST_LOG_CLEANUP_THRESHOLD, 100),
 );
+const productionDatabasePath = resolveFromRoot(
+  process.env.DATABASE_PATH,
+  "data/postman2api.db",
+);
+const databasePath = runtimeEnvironment === "production"
+  ? resolveFromRoot(process.env.DATABASE_PATH, "data/postman2api.db")
+  : runtimeEnvironment === "test"
+    ? resolveFromRoot(process.env.TEST_DATABASE_PATH, "data/postman2api.test.db")
+    : resolveFromRoot(process.env.DEV_DATABASE_PATH, "data/postman2api.dev.db");
+
+if (runtimeEnvironment !== "production" && databasePath === productionDatabasePath) {
+  throw new Error(
+    `[config] Refusing to use the production database in ${runtimeEnvironment} mode: ${databasePath}`,
+  );
+}
 
 export const config = {
+  runtimeEnvironment,
   port: Number(process.env.PORT) || 1930,
   dashboardPort: Number(process.env.DASHBOARD_PORT) || 1931,
   apiKey: process.env.API_KEY || "postman2api-secret-key",
-  databasePath: resolveFromRoot(process.env.DATABASE_PATH, "data/postman2api.db"),
+  databasePath,
   encryptionKey: process.env.ENCRYPTION_KEY || "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
   streamReadTimeoutMs,
   providerRequestTimeoutMs,

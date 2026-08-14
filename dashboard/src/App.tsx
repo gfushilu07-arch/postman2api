@@ -1236,17 +1236,37 @@ function ConfirmModal({
 function StatsTab() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [accountEmails, setAccountEmails] = useState<Map<number, string>>(new Map());
+  const [requestSearch, setRequestSearch] = useState("");
+  const [appliedRequestSearch, setAppliedRequestSearch] = useState("");
+  const [requestSearchLoading, setRequestSearchLoading] = useState(false);
   const [selectedRequestId, setSelectedRequestId] = useState<number | null>(null);
   const [requestDetail, setRequestDetail] = useState<RequestDetail | null>(null);
   const [requestDetailError, setRequestDetailError] = useState<string | null>(null);
   const [requestDetailLoading, setRequestDetailLoading] = useState(false);
 
   useEffect(() => {
-    const get = () => fetchStats().then((r) => setStats(r.data));
-    get();
-    const interval = setInterval(get, 5000);
-    return () => clearInterval(interval);
-  }, []);
+    const timer = setTimeout(() => setAppliedRequestSearch(requestSearch.trim()), 350);
+    return () => clearTimeout(timer);
+  }, [requestSearch]);
+
+  useEffect(() => {
+    let active = true;
+    const get = async (showLoading: boolean) => {
+      if (showLoading) setRequestSearchLoading(true);
+      try {
+        const response = await fetchStats(appliedRequestSearch);
+        if (active) setStats(response.data);
+      } finally {
+        if (active && showLoading) setRequestSearchLoading(false);
+      }
+    };
+    void get(true);
+    const interval = setInterval(() => void get(false), 5000);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [appliedRequestSearch]);
 
   const openRequestDetail = async (id: number) => {
     setSelectedRequestId(id);
@@ -1364,14 +1384,48 @@ function StatsTab() {
         </div>
       </div>
 
-      {stats.recentRequests.length > 0 && (
-        <>
-          <div className="section-head">
-            <div className="section-title">
-              最近请求 <span className="section-count-badge">{stats.recentRequests.length}</span>
-            </div>
-            <div className="section-meta">Token：上游=真实值 · 混合/估算=本地估算</div>
+      <>
+        <div className="section-head">
+          <div className="section-title">
+            最近请求 <span className="section-count-badge">
+              {appliedRequestSearch
+                ? `${stats.recentRequests.length}/${stats.recentRequestTotal}`
+                : stats.recentRequestTotal}
+            </span>
           </div>
+          <div className="section-meta">Token：上游=真实值 · 混合/估算=本地估算</div>
+        </div>
+        <div className="stats-search-toolbar">
+          <div className="stats-search">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="11" cy="11" r="7" />
+              <path d="m20 20-3.5-3.5" />
+            </svg>
+            <input
+              value={requestSearch}
+              onChange={(event) => setRequestSearch(event.target.value)}
+              placeholder="搜索发送上下文、返回内容或错误信息"
+              aria-label="搜索最近请求详情"
+            />
+            {requestSearch && (
+              <button
+                type="button"
+                className="stats-search-clear"
+                onClick={() => setRequestSearch("")}
+                title="清除搜索"
+                aria-label="清除搜索"
+              >×</button>
+            )}
+          </div>
+          <div className="stats-search-meta">
+            {requestSearchLoading
+              ? "搜索中..."
+              : appliedRequestSearch
+                ? `匹配 ${stats.recentRequests.length} 条，仅搜索最近 ${stats.recentRequestTotal} 条详情`
+                : `可搜索最近 ${stats.recentRequestTotal} 条请求详情`}
+          </div>
+        </div>
+        {stats.recentRequests.length > 0 ? (
           <div className="table-card stats-table-card">
             <table>
               <thead>
@@ -1386,7 +1440,7 @@ function StatsTab() {
                 </tr>
               </thead>
               <tbody>
-                {stats.recentRequests.slice(0, 20).map((r: RecentRequest) => {
+                {stats.recentRequests.map((r: RecentRequest) => {
                   const accountEmail = r.accountEmail
                     || (r.accountId !== null ? accountEmails.get(r.accountId) : undefined);
                   return (
@@ -1432,8 +1486,12 @@ function StatsTab() {
               </tbody>
             </table>
           </div>
-        </>
-      )}
+        ) : (
+          <div className="stats-search-empty">
+            {appliedRequestSearch ? "最近请求中没有匹配的详情内容" : "暂无请求记录"}
+          </div>
+        )}
+      </>
       {selectedRequestId !== null && (
         <RequestDetailDrawer
           detail={requestDetail}

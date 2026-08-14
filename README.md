@@ -32,6 +32,7 @@
 - 额度安全流式输出、SQLite 状态存储和 WebSocket 面板更新
 - 统计页展示账号邮箱、推理强度、首字耗时和 Token 口径
 - 点击最近请求可查看发送上下文与返回内容快照
+- 支持按最近请求的发送内容、返回内容和错误信息搜索
 
 ### 注册工具
 
@@ -253,6 +254,8 @@ curl http://localhost:1930/v1/models \
 | `API_KEY` | 示例值 | `/v1/*` 接口鉴权密钥。 |
 | `ENCRYPTION_KEY` | 示例值 | 敏感账号信息加密密钥，必须替换为强随机值。 |
 | `DATABASE_PATH` | `./data/postman2api.db` | SQLite 数据库路径。 |
+| `DEV_DATABASE_PATH` | `./data/postman2api.dev.db` | 开发模式专用 SQLite，不会读取正式库。 |
+| `TEST_DATABASE_PATH` | `./data/postman2api.test.db` | 自动化测试专用 SQLite。 |
 | `REQUEST_LOG_RETAIN_COUNT` | `50` | 请求详情批量清理后保留的最近记录数。 |
 | `REQUEST_LOG_CLEANUP_THRESHOLD` | `100` | 请求详情达到该数量后触发批量清理。 |
 | `REQUEST_LOG_CLEANUP_INTERVAL_MS` | `600000` | 请求详情与过期会话检查周期，默认 10 分钟。 |
@@ -267,6 +270,10 @@ curl http://localhost:1930/v1/models \
 | `LOGIN_BROWSER_BACKEND` | `camoufox` | 登录后端，可选 `camoufox` 或 `playwright`。 |
 
 管理面板中的设置会存储在 SQLite 中，并覆盖对应环境变量的默认值。
+
+数据库按运行环境硬隔离：`bun start`、`bun run dev` 和 `bun run dev:api`
+固定使用 `DEV_DATABASE_PATH`；`bun test` 使用 `TEST_DATABASE_PATH`；只有
+`bun run start:prod` 与 `bun run migrate` 会读取正式的 `DATABASE_PATH`。
 
 请求详情采用高低水位批量清理：默认超过 100 条时一次清理到最近 50 条，
 累计请求数和 Token 会先归档到汇总表，因此统计概览不会随详情删除而下降。

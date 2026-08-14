@@ -103,6 +103,7 @@ export interface Stats {
   totalTokens: number;
   totalAccounts: number;
   activeAccounts: number;
+  recentRequestTotal: number;
   recentRequests: RecentRequest[];
 }
 
@@ -188,8 +189,11 @@ export async function toggleAccount(id: number, enabled: boolean): Promise<{ suc
   });
 }
 
-export async function fetchStats(): Promise<{ data: Stats }> {
-  return api("/api/stats");
+export async function fetchStats(requestSearch = ""): Promise<{ data: Stats }> {
+  const params = new URLSearchParams();
+  if (requestSearch.trim()) params.set("q", requestSearch.trim());
+  const query = params.toString();
+  return api(`/api/stats${query ? `?${query}` : ""}`);
 }
 
 export async function fetchRequestDetail(id: number): Promise<{ data: RequestDetail }> {

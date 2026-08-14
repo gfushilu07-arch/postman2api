@@ -6,13 +6,13 @@ import { db } from "../src/db/index";
 import { accounts, requestLogs } from "../src/db/schema";
 
 let accountId: number | undefined;
-let requestLogId: number | undefined;
+const requestLogIds = new Set<number>();
 
 afterEach(async () => {
-  if (requestLogId !== undefined) {
+  for (const requestLogId of requestLogIds) {
     await db.delete(requestLogs).where(eq(requestLogs.id, requestLogId));
-    requestLogId = undefined;
   }
+  requestLogIds.clear();
   if (accountId !== undefined) {
     await db.delete(accounts).where(eq(accounts.id, accountId));
     accountId = undefined;
@@ -49,7 +49,8 @@ describe("request statistics", () => {
       durationMs: 654,
       createdAt: new Date(),
     }).returning();
-    requestLogId = requestLog!.id;
+    const requestLogId = requestLog!.id;
+    requestLogIds.add(requestLogId);
 
     const app = new Hono().route("/api/stats", statsRouter);
     const response = await app.request("/api/stats");
@@ -81,5 +82,46 @@ describe("request statistics", () => {
       ],
       responseMessage: { role: "assistant", content: "Hi!" },
     });
+  });
+
+  test("filters the latest request list by request and response detail content", async () => {
+    const marker = `detail-search-${crypto.randomUUID()}`;
+    const [requestMatch] = await db.insert(requestLogs).values({
+      model: "gpt-5.6-sol",
+      status: "success",
+      requestMessages: JSON.stringify([{ role: "user", content: `request ${marker}` }]),
+      responseMessage: JSON.stringify({ role: "assistant", content: "ordinary response" }),
+      createdAt: new Date(),
+    }).returning();
+    const [responseMatch] = await db.insert(requestLogs).values({
+      model: "claude-sonnet-4-6",
+      status: "success",
+      requestMessages: JSON.stringify([{ role: "user", content: "ordinary request" }]),
+      responseMessage: JSON.stringify({ role: "assistant", content: `response ${marker.toUpperCase()}` }),
+      createdAt: new Date(Date.now() + 1),
+    }).returning();
+    const [nonMatch] = await db.insert(requestLogs).values({
+      model: "auto",
+      status: "error",
+      requestMessages: JSON.stringify([{ role: "user", content: "unrelated request" }]),
+      responseMessage: null,
+      errorMessage: "unrelated failure",
+      createdAt: new Date(Date.now() + 2),
+    }).returning();
+    requestLogIds.add(requestMatch!.id);
+    requestLogIds.add(responseMatch!.id);
+    requestLogIds.add(nonMatch!.id);
+
+    const app = new Hono().route("/api/stats", statsRouter);
+    const response = await app.request(`/api/stats?q=${encodeURIComponent(marker)}`);
+
+    expect(response.status).toBe(200);
+    const body = await response.json() as any;
+    expect(body.data.recentRequests.map((item: any) => item.id).sort()).toEqual([
+      requestMatch!.id,
+      responseMatch!.id,
+    ].sort());
+    expect(body.data.recentRequests.some((item: any) => item.id === nonMatch!.id)).toBe(false);
+    expect(body.data.recentRequestTotal).toBeGreaterThanOrEqual(3);
   });
 });
