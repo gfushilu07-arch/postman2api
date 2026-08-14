@@ -31,5 +31,8 @@ tokens/
 # 本地工具记忆文件
 .workbuddy/
 
+# postman-register 运行时验证文件
+packages/postman-register/runtime/
+
 # tokens 目录的本地副本（同样含账号凭据，禁止提交）
 tokens copy/
