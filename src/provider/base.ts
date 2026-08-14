@@ -45,6 +45,37 @@ export interface ChatCompletionResponse {
   };
 }
 
+export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh";
+export type TokenUsageSource = "upstream" | "estimated" | "mixed";
+
+export function normalizeReasoningEffort(request: Pick<ChatCompletionRequest, "reasoning_effort" | "thinking">): ReasoningEffort {
+  if (request.thinking?.type && /^(disabled|none|off)$/i.test(request.thinking.type)) {
+    return "none";
+  }
+
+  const raw = request.reasoning_effort ?? request.thinking?.effort;
+  if (typeof raw === "string") {
+    const normalized = raw.trim().toLowerCase();
+    if (normalized === "none" || normalized === "off" || normalized === "disabled") return "none";
+    if (normalized === "minimal" || normalized === "low") return "low";
+    if (normalized === "medium" || normalized === "default") return "medium";
+    if (normalized === "high") return "high";
+    if (normalized === "xhigh" || normalized === "extra_high" || normalized === "extra-high") return "xhigh";
+  }
+
+  const budgetTokens = request.thinking?.budget_tokens;
+  if (typeof budgetTokens === "number" && Number.isFinite(budgetTokens)) {
+    if (budgetTokens <= 0) return "none";
+    if (budgetTokens <= 2_048) return "low";
+    if (budgetTokens <= 8_192) return "medium";
+    if (budgetTokens <= 32_768) return "high";
+    return "xhigh";
+  }
+
+  // Postman's native default is its highest available thinking mode.
+  return "xhigh";
+}
+
 export interface StreamChunk {
   id: string;
   object: "chat.completion.chunk";
@@ -89,6 +120,7 @@ export interface TokenUsage {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  source: TokenUsageSource;
 }
 
 export interface ProviderResult {
@@ -104,6 +136,7 @@ export interface ProviderResult {
   tokensUsed?: number;
   promptTokens?: number;
   completionTokens?: number;
+  tokenSource?: TokenUsageSource;
   creditsUsed?: number;
   creditSource?: CreditSource;
   error?: string;

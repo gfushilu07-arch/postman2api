@@ -30,6 +30,8 @@
 - 多账号池、会话粘性和最少在途请求路由
 - 额度耗尽、限流和上游故障时的账号切换
 - 额度安全流式输出、SQLite 状态存储和 WebSocket 面板更新
+- 统计页展示账号邮箱、推理强度、首字耗时和 Token 口径
+- 点击最近请求可查看发送上下文与返回内容快照
 
 ### 注册工具
 
@@ -86,12 +88,13 @@ cp .env.example .env
 
 ### 3. 构建并启动
 
-正式运行使用 `PORT`（默认 `1930`），只读取已经构建好的 `dashboard/dist`：
+正式运行使用 `PORT`（默认 `1930`）。`bun run build` 会生成前端
+`dashboard/dist` 和后端 `dist/index.js`，`start:prod` 只运行编译后的后端代码：
 
 ```bash
 bun run build
 bun run migrate
-bun start
+bun run start:prod
 ```
 
 默认地址：
@@ -118,7 +121,21 @@ bun run dev
 - 开发 API：`http://localhost:1932/`
 - 正式运行：`http://localhost:1930/`，由构建后的 `dashboard/dist` 提供
 
-修改前端代码后直接访问 `1931` 查看效果；需要测试正式版本时执行 `bun run build && bun start`，访问 `1930`。
+修改前端代码后直接访问 `1931` 查看效果；需要测试正式版本时执行
+`bun run build && bun run start:prod`，访问 `1930`。
+
+### Docker 运行
+
+Docker 运行时会在镜像内完成前端和后端编译，容器启动时自动执行数据库迁移；
+SQLite 数据默认挂载到 `/data`，因此替换镜像不会丢失账号和统计数据：
+
+```bash
+docker compose up -d --build
+docker compose logs -f postman2api
+```
+
+默认镜像适合 API 和管理面板运行，不会下载登录浏览器。需要在容器内执行
+Playwright 登录时，可将构建目标改为 `runtime-browser`，或继续使用宿主机的浏览器登录。
 
 ## 主服务：连接账号
 

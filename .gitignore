@@ -8,6 +8,10 @@ scripts/auth/.venv/
 scripts/auth/__pycache__/
 scripts/auth/app/__pycache__/
 dashboard/dist/
+dist/
+.releases/
+dashboard/dist
+dist
 dashboard/node_modules/
 *.db
 *.db-wal

@@ -1,0 +1,19 @@
+.git
+.github
+.releases
+.playwright-cli
+node_modules
+dashboard/node_modules
+dashboard/dist
+dist
+data
+tokens
+tokens copy
+.env
+.env.*
+!.env.example
+*.db
+*.db-wal
+*.db-shm
+*.log
+.DS_Store

@@ -19,6 +19,7 @@ interface SessionBinding {
 
 interface InFlightLease {
   startedAt: number;
+  sessionId?: string;
 }
 
 interface AccountCooldown {
@@ -105,7 +106,7 @@ class AccountPool {
       if (preferred) {
         return {
           account: preferred,
-          leaseId: reserve ? this.trackRequestStart(preferred.id) : "",
+          leaseId: reserve ? this.trackRequestStart(preferred.id, sessionKey) : "",
         };
       }
       this.releaseSession(sessionKey, binding.accountId);
@@ -136,7 +137,7 @@ class AccountPool {
     if (sessionKey) this.bindSession(sessionKey, selected.id);
     return {
       account: selected,
-      leaseId: reserve ? this.trackRequestStart(selected.id) : "",
+      leaseId: reserve ? this.trackRequestStart(selected.id, sessionKey) : "",
     };
   }
 
@@ -147,6 +148,31 @@ class AccountPool {
     if (!binding || (accountId !== undefined && binding.accountId !== accountId)) return;
     this.sessionBindings.delete(sessionKey);
     deleteConversationId(binding.accountId, sessionKey);
+  }
+
+  forgetSession(sessionId: string | undefined, accountId?: number | null): void {
+    const sessionKey = this.normalizeSessionId(sessionId);
+    if (!sessionKey) return;
+    const binding = this.sessionBindings.get(sessionKey);
+    this.sessionBindings.delete(sessionKey);
+    if (binding) deleteConversationId(binding.accountId, sessionKey);
+    if (accountId !== null && accountId !== undefined && accountId !== binding?.accountId) {
+      deleteConversationId(accountId, sessionKey);
+    }
+  }
+
+  isSessionInFlight(sessionId: string | undefined): boolean {
+    const sessionKey = this.normalizeSessionId(sessionId);
+    if (!sessionKey) return false;
+    for (const accountId of this.inFlightByAccountId.keys()) {
+      const leases = this.inFlightByAccountId.get(accountId);
+      if (!leases) continue;
+      this.getInFlightCount(accountId);
+      for (const lease of leases.values()) {
+        if (lease.sessionId === sessionKey) return true;
+      }
+    }
+    return false;
   }
 
   releaseAccountBindings(accountId: number): void {
@@ -225,10 +251,10 @@ class AccountPool {
     return leases.size;
   }
 
-  trackRequestStart(accountId: number): string {
+  trackRequestStart(accountId: number, sessionId?: string): string {
     const leaseId = crypto.randomUUID();
     const leases = this.inFlightByAccountId.get(accountId) || new Map<string, InFlightLease>();
-    leases.set(leaseId, { startedAt: Date.now() });
+    leases.set(leaseId, { startedAt: Date.now(), sessionId: this.normalizeSessionId(sessionId) });
     this.inFlightByAccountId.set(accountId, leases);
     return leaseId;
   }

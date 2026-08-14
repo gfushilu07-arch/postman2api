@@ -8,6 +8,9 @@ import {
   type ProviderResult,
   type StreamChunk,
   type StreamFailure,
+  type TokenUsage,
+  type TokenUsageSource,
+  normalizeReasoningEffort,
 } from "./base";
 import type { Account } from "../db/schema";
 import { config } from "../config";
@@ -283,7 +286,7 @@ export class PostmanProvider extends BaseProvider {
         supportsAskUser: false,
         supportsActionRecommendations: true,
         useThinkingModeIfAvailable: true,
-        thinkingLevel: "xhigh",
+        thinkingLevel: normalizeReasoningEffort(request),
       },
     };
 
@@ -364,28 +367,45 @@ export class PostmanProvider extends BaseProvider {
         id: tc.id, type: "function" as const, function: { name: tc.name, arguments: tc.args },
       }));
 
+      if (!content && !reasoningContent && toolCalls.length === 0) {
+        return {
+          success: false,
+          retryable: true,
+          error: "Postman returned an empty response without text, reasoning, or tool calls",
+        };
+      }
+
       const message: any = { role: "assistant", content: content || null };
       if (reasoningContent) message.reasoning_content = reasoningContent;
       if (toolCalls.length > 0) message.tool_calls = toolCalls;
 
-      const upstreamTokens = reader.tokenUsage;
-      const promptTokens = upstreamTokens?.promptTokens ?? this.estimateMessagesTokens(request.messages);
-      const completionTokens = upstreamTokens?.completionTokens
-        ?? this.estimateTokens(content + reasoningContent);
-      const totalTokens = upstreamTokens?.totalTokens ?? promptTokens + completionTokens;
+      const usage = resolveTokenUsage(
+        reader.tokenUsage,
+        this.estimateMessagesTokens(request.messages),
+        this.estimateTokens(content + reasoningContent),
+      );
 
       const completionResponse: ChatCompletionResponse = {
         id: completionId, object: "chat.completion", created: Math.floor(Date.now() / 1000),
         model: request.model,
         choices: [{ index: 0, message, finish_reason: toolCalls.length > 0 ? "tool_calls" : content ? "stop" : null }],
         usage: {
-          prompt_tokens: promptTokens,
-          completion_tokens: completionTokens,
-          total_tokens: totalTokens,
+          prompt_tokens: usage.promptTokens,
+          completion_tokens: usage.completionTokens,
+          total_tokens: usage.totalTokens,
         },
       };
 
-      return { success: true, response: completionResponse, promptTokens: completionResponse.usage.prompt_tokens, completionTokens: completionResponse.usage.completion_tokens, tokensUsed: completionResponse.usage.total_tokens, creditSource: "fixed", creditsUsed: 0 };
+      return {
+        success: true,
+        response: completionResponse,
+        promptTokens: usage.promptTokens,
+        completionTokens: usage.completionTokens,
+        tokensUsed: usage.totalTokens,
+        tokenSource: usage.source,
+        creditSource: "fixed",
+        creditsUsed: 0,
+      };
     } catch (error) {
       return { success: false, error: `Postman request failed: ${error instanceof Error ? error.message : String(error)}` };
     }
@@ -480,6 +500,14 @@ export class PostmanProvider extends BaseProvider {
         upstreamReader.releaseLock();
         return { success: false, error: extractUpstreamError(rawPrefix || ndjsonBuffer) };
       }
+      if (upstreamDone && !initialDeltas.some(isMeaningfulDelta)) {
+        upstreamReader.releaseLock();
+        return {
+          success: false,
+          retryable: true,
+          error: "Postman returned an empty response without text, reasoning, or tool calls",
+        };
+      }
       if (pmReader.conversationId) {
         setConversationId(account.id, request._sessionId, pmReader.conversationId);
       }
@@ -524,18 +552,14 @@ export class PostmanProvider extends BaseProvider {
       };
 
       const getStreamTokenUsage = () => {
-        const upstreamTokens = pmReader.tokenUsage;
-        const promptTokens = upstreamTokens?.promptTokens ?? this.estimateMessagesTokens(request.messages);
         const toolArguments = Array.from(streamToolCalls.values())
           .map((toolCall) => toolCall.args)
           .join("");
-        const completionTokens = upstreamTokens?.completionTokens
-          ?? this.estimateTokens(streamContent + streamReasoningContent + toolArguments);
-        return {
-          promptTokens,
-          completionTokens,
-          totalTokens: upstreamTokens?.totalTokens ?? promptTokens + completionTokens,
-        };
+        return resolveTokenUsage(
+          pmReader.tokenUsage,
+          this.estimateMessagesTokens(request.messages),
+          this.estimateTokens(streamContent + streamReasoningContent + toolArguments),
+        );
       };
 
       const failStream = async (kind: StreamFailure["kind"], message: string): Promise<Error> => {
@@ -878,6 +902,31 @@ function extractQuotaApiError(text: string): string {
   } catch {
     return text.trim().slice(0, 300);
   }
+}
+
+function resolveTokenUsage(
+  upstream: {
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+  } | null,
+  estimatedPromptTokens: number,
+  estimatedCompletionTokens: number,
+): TokenUsage {
+  const hasPrompt = upstream?.promptTokens !== undefined;
+  const hasCompletion = upstream?.completionTokens !== undefined;
+  const hasTotal = upstream?.totalTokens !== undefined;
+  const promptTokens = hasPrompt ? upstream!.promptTokens! : estimatedPromptTokens;
+  const completionTokens = hasCompletion ? upstream!.completionTokens! : estimatedCompletionTokens;
+  const totalTokens = hasTotal ? upstream!.totalTokens! : promptTokens + completionTokens;
+  const upstreamFields = Number(hasPrompt) + Number(hasCompletion) + Number(hasTotal);
+  const source: TokenUsageSource = upstreamFields === 3
+    ? "upstream"
+    : upstreamFields === 0
+      ? "estimated"
+      : "mixed";
+
+  return { promptTokens, completionTokens, totalTokens, source };
 }
 
 function parseRetryAfterMs(value: string | null): number {

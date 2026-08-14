@@ -2,6 +2,7 @@ import { eq, sql } from "drizzle-orm";
 import { db } from "../db/index";
 import { sessionStates } from "../db/schema";
 import type { ChatMessage } from "./base";
+import { broadcast } from "../ws/index";
 
 const MAX_SESSION_MESSAGES_CHARS = 800_000;
 
@@ -135,6 +136,7 @@ export async function commitSession(
       updatedAt: now,
     },
   });
+  broadcast({ type: "session_updated", data: { sessionId, accountId } });
 }
 
 export async function getSessionMessages(sessionId: string): Promise<ChatMessage[]> {

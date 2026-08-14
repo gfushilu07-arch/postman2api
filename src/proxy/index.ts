@@ -9,6 +9,7 @@ import { commitSession, prepareSession } from "../provider/session-state";
 import { deleteConversationId } from "../provider/conversation-store";
 import { acquireSessionLock } from "./session-lock";
 import { config } from "../config";
+import { normalizeReasoningEffort } from "../provider/base";
 
 interface ByteStreamReader {
   read(): Promise<{ done: boolean; value?: Uint8Array }>;
@@ -16,10 +17,13 @@ interface ByteStreamReader {
   releaseLock(): void;
 }
 
+const MAX_REQUEST_SNAPSHOT_CHARS = 240_000;
+
 export async function handleChatCompletion(
   body: ChatCompletionRequest,
   signal?: AbortSignal,
 ): Promise<Response> {
+  const requestStartedAt = Date.now();
   const stream = body.stream ?? false;
   const requestAbort = new AbortController();
   const detachClientAbort = forwardAbort(signal, requestAbort);
@@ -33,6 +37,7 @@ export async function handleChatCompletion(
     body.messages = prepared.messages;
     const routed = await routeRequest(body, stream);
     const { result, account, durationMs } = routed;
+    const ttfbMs = Date.now() - requestStartedAt;
 
     if (result.success && result.stream) {
       try {
@@ -44,6 +49,8 @@ export async function handleChatCompletion(
           requestAbort,
           detachClientAbort,
           releaseSessionLock,
+          requestStartedAt,
+          initialTtfbMs: ttfbMs,
         });
         releaseAfterReturn = false;
         cleanupAfterReturn = false;
@@ -61,12 +68,16 @@ export async function handleChatCompletion(
         await commitSession(body._sessionId, body.messages, assistantMessage, account.id);
       }
       await recordRequest({
+        ...requestLogContext(body),
         accountId: account.id,
         model: body.model,
         promptTokens: result.promptTokens || 0,
         completionTokens: result.completionTokens || 0,
         totalTokens: result.tokensUsed || 0,
+        tokenSource: result.tokenSource,
+        responseMessage: assistantMessage ? serializeSnapshot(assistantMessage) : undefined,
         status: "success",
+        ttfbMs,
         durationMs,
       });
 
@@ -77,9 +88,11 @@ export async function handleChatCompletion(
 
     // Non-success
     await recordRequest({
+      ...requestLogContext(body),
       accountId: account.id,
       model: body.model,
       status: "error",
+      ttfbMs,
       durationMs,
       errorMessage: result.error || "Unknown error",
     });
@@ -88,6 +101,7 @@ export async function handleChatCompletion(
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
     await recordRequest({
+      ...requestLogContext(body),
       model: body.model,
       status: "error",
       durationMs: 0,
@@ -115,15 +129,18 @@ function wrapQuotaSafeStream(
     requestAbort: AbortController;
     detachClientAbort: () => void;
     releaseSessionLock: () => void;
+    requestStartedAt: number;
+    initialTtfbMs: number;
   },
 ): Response {
-  const startedAt = Date.now();
+  const startedAt = ctx.requestStartedAt;
   const encoder = new TextEncoder();
   let cancelled = false;
   let lifecycleFinalized = false;
   let activeReader: ByteStreamReader | undefined;
   let releaseActiveAttempt: (() => void) | undefined;
   let activeAttempt = initialAttempt;
+  let activeTtfbMs = ctx.initialTtfbMs;
 
   const finalizeLifecycle = () => {
     if (lifecycleFinalized) return;
@@ -218,12 +235,16 @@ function wrapQuotaSafeStream(
               );
             }
             await recordRequest({
+              ...requestLogContext(ctx.request),
               accountId: attempt.account.id,
               model: ctx.model,
               promptTokens: tokenUsage?.promptTokens ?? attempt.result.promptTokens ?? 0,
               completionTokens: tokenUsage?.completionTokens ?? attempt.result.completionTokens ?? 0,
               totalTokens: tokenUsage?.totalTokens ?? attempt.result.tokensUsed ?? 0,
+              tokenSource: tokenUsage?.source ?? attempt.result.tokenSource,
+              responseMessage: assistantMessage ? serializeSnapshot(assistantMessage) : undefined,
               status: "success",
+              ttfbMs: activeTtfbMs,
               durationMs: Date.now() - startedAt,
             });
             clearInterval(keepalive);
@@ -240,9 +261,11 @@ function wrapQuotaSafeStream(
             : String(attemptError);
           deleteConversationId(attempt.account.id, ctx.sessionId);
           await recordRequest({
+            ...requestLogContext(ctx.request),
             accountId: attempt.account.id,
             model: ctx.model,
             status: "error",
+            ttfbMs: activeTtfbMs,
             durationMs: Date.now() - startedAt,
             errorMessage,
           });
@@ -253,6 +276,7 @@ function wrapQuotaSafeStream(
           }
 
           activeAttempt = await routeRequest(ctx.request, true);
+          activeTtfbMs = Date.now() - ctx.requestStartedAt;
         }
       } catch (error) {
         if (!cancelled) controller.error(error);
@@ -302,6 +326,33 @@ async function recordRequest(entry: NewRequestLog): Promise<void> {
   } catch (err) {
     console.error("[proxy] Failed to log request:", err);
   }
+}
+
+function requestLogContext(request: ChatCompletionRequest): Pick<
+  NewRequestLog,
+  "sessionId" | "reasoningEffort" | "requestMessages"
+> {
+  return {
+    sessionId: request._sessionId,
+    reasoningEffort: normalizeReasoningEffort(request),
+    requestMessages: serializeSnapshot(request.messages),
+  };
+}
+
+function serializeSnapshot(value: unknown): string {
+  let raw: string;
+  try {
+    raw = JSON.stringify(value) ?? "null";
+  } catch {
+    raw = JSON.stringify({ unavailable: true, reason: "Unable to serialize snapshot" });
+  }
+  if (raw.length <= MAX_REQUEST_SNAPSHOT_CHARS) return raw;
+
+  return JSON.stringify({
+    truncated: true,
+    originalChars: raw.length,
+    preview: raw.slice(0, MAX_REQUEST_SNAPSHOT_CHARS - 200),
+  });
 }
 
 function errorResponse(message: string, status: number): Response {

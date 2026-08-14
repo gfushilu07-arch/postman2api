@@ -25,15 +25,40 @@ async function migrate() {
   await db.run(sql`CREATE TABLE IF NOT EXISTS request_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER REFERENCES accounts(id),
+    session_id TEXT,
     model TEXT,
+    reasoning_effort TEXT,
     prompt_tokens INTEGER DEFAULT 0,
     completion_tokens INTEGER DEFAULT 0,
     total_tokens INTEGER DEFAULT 0,
+    token_source TEXT,
+    request_messages TEXT,
+    response_message TEXT,
     status TEXT NOT NULL,
+    ttfb_ms INTEGER,
     duration_ms INTEGER,
     error_message TEXT,
     created_at INTEGER NOT NULL
   )`);
+
+  // Keep existing SQLite databases compatible with newer request details.
+  const requestLogColumns = (await db.all(
+    sql`PRAGMA table_info(request_logs)`,
+  )) as Array<{ name: string }>;
+  const existingColumns = new Set(requestLogColumns.map((column) => column.name));
+  const additions: Array<[string, string]> = [
+    ["session_id", "TEXT"],
+    ["reasoning_effort", "TEXT"],
+    ["token_source", "TEXT"],
+    ["request_messages", "TEXT"],
+    ["response_message", "TEXT"],
+    ["ttfb_ms", "INTEGER"],
+  ];
+  for (const [name, type] of additions) {
+    if (!existingColumns.has(name)) {
+      await db.run(sql.raw(`ALTER TABLE request_logs ADD COLUMN ${name} ${type}`));
+    }
+  }
 
   await db.run(sql`CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,

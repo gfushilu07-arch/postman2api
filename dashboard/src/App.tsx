@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import {
   fetchAccounts,
   fetchStats,
+  fetchRequestDetail,
   fetchSettings,
   loginAccount,
   confirmSignup,
@@ -14,10 +15,28 @@ import {
   type Account,
   type AccountImportResponse,
   type AccountTestResult,
+  type RecentRequest,
+  type RequestDetail,
   type Stats,
 } from "./lib/api";
+import SessionsTab from "./SessionsTab";
 
-type Tab = "accounts" | "stats" | "settings";
+type Tab = "accounts" | "sessions" | "stats" | "settings";
+
+const TAB_PATHS: Record<Tab, string> = {
+  accounts: "/accounts",
+  sessions: "/sessions",
+  stats: "/stats",
+  settings: "/settings",
+};
+
+function getTabFromPathname(pathname: string): Tab {
+  const normalizedPath = pathname.replace(/\/+$/, "") || "/";
+  const matchedTab = (Object.entries(TAB_PATHS) as [Tab, string][]).find(
+    ([, path]) => path === normalizedPath,
+  );
+  return matchedTab?.[0] ?? "accounts";
+}
 
 interface LoginLogEntry {
   step: string;
@@ -41,7 +60,8 @@ function getAccountDisplayStatus(a: Account): { status: string; label: string } 
 }
 
 export default function App() {
-  const [tab, setTab] = useState<Tab>("accounts");
+  const [tab, setTab] = useState<Tab>(() => getTabFromPathname(window.location.pathname));
+  const [focusedAccountId, setFocusedAccountId] = useState<number | null>(null);
   const [toast, setToast] = useState<{ msg: string; type: "success" | "error" | "info" } | null>(null);
   const [loginLogs, setLoginLogs] = useState<LoginLogEntry[] | null>(null);
 
@@ -60,9 +80,31 @@ export default function App() {
     setLoginLogs((prev) => (prev === null ? null : [...prev, { step: "完成", msg: "账号接入流程已完成", level: "info", ts: Date.now() / 1000 }]));
   }, []);
 
+  const navigateToTab = useCallback((nextTab: Tab) => {
+    setTab(nextTab);
+    const nextPath = TAB_PATHS[nextTab];
+    if (window.location.pathname !== nextPath) {
+      window.history.pushState(null, "", nextPath);
+    }
+  }, []);
+
+  useEffect(() => {
+    const initialTab = getTabFromPathname(window.location.pathname);
+    const canonicalPath = TAB_PATHS[initialTab];
+    if (window.location.pathname !== canonicalPath) {
+      window.history.replaceState(null, "", canonicalPath);
+    }
+
+    const handlePopState = () => {
+      setTab(getTabFromPathname(window.location.pathname));
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
   return (
     <>
-      <Header tab={tab} setTab={setTab} />
+      <Header tab={tab} navigateToTab={navigateToTab} />
       {toast && <Toast msg={toast.msg} type={toast.type} />}
       {loginLogs && <LoginLogPanel logs={loginLogs} onClose={() => setLoginLogs(null)} />}
       <main className="admin-main">
@@ -72,6 +114,16 @@ export default function App() {
             onLoginStart={onLoginStart}
             onLoginLog={onLoginLog}
             onLoginEnd={onLoginEnd}
+            focusedAccountId={focusedAccountId}
+          />
+        )}
+        {tab === "sessions" && (
+          <SessionsTab
+            showToast={showToast}
+            onViewAccount={(accountId) => {
+              setFocusedAccountId(accountId);
+              navigateToTab("accounts");
+            }}
           />
         )}
         {tab === "stats" && <StatsTab />}
@@ -81,7 +133,7 @@ export default function App() {
   );
 }
 
-function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
+function Header({ tab, navigateToTab }: { tab: Tab; navigateToTab: (tab: Tab) => void }) {
   return (
     <header className="admin-header">
       <div className="admin-header-inner">
@@ -95,10 +147,20 @@ function Header({ tab, setTab }: { tab: Tab; setTab: (t: Tab) => void }) {
           </span>
         </div>
         <nav className="admin-nav">
-          {(["accounts", "stats", "settings"] as Tab[]).map((t) => (
-            <button key={t} className={`admin-nav-link ${tab === t ? "active" : ""}`} onClick={() => setTab(t)}>
-              {t === "accounts" ? "账号" : t === "stats" ? "统计" : "设置"}
-            </button>
+          {(["accounts", "sessions", "stats", "settings"] as Tab[]).map((t) => (
+            <a
+              key={t}
+              href={TAB_PATHS[t]}
+              className={`admin-nav-link ${tab === t ? "active" : ""}`}
+              aria-current={tab === t ? "page" : undefined}
+              onClick={(event) => {
+                if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                event.preventDefault();
+                navigateToTab(t);
+              }}
+            >
+              {t === "accounts" ? "账号" : t === "sessions" ? "会话绑定" : t === "stats" ? "统计" : "设置"}
+            </a>
           ))}
         </nav>
         <div className="admin-header-right">
@@ -217,11 +279,13 @@ function AccountsTab({
   onLoginStart,
   onLoginLog,
   onLoginEnd,
+  focusedAccountId,
 }: {
   showToast: (msg: string, type?: "success" | "error" | "info") => void;
   onLoginStart: () => void;
   onLoginLog: (entry: LoginLogEntry) => void;
   onLoginEnd: () => void;
+  focusedAccountId: number | null;
 }) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [loading, setLoading] = useState(true);
@@ -296,6 +360,12 @@ function AccountsTab({
       clearInterval(poll);
     };
   }, [load, onLoginLog, onLoginEnd]);
+
+  useEffect(() => {
+    if (focusedAccountId === null || loading) return;
+    const row = document.querySelector<HTMLElement>(`[data-account-id="${focusedAccountId}"]`);
+    row?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [focusedAccountId, loading, accounts]);
 
   const counts: Record<string, number> = { all: accounts.length };
   accounts.forEach((a) => {
@@ -669,7 +739,11 @@ function AccountsTab({
                 const isTesting = testing.has(a.id);
                 const testResult = testResults[a.id];
                 return (
-                  <tr key={a.id}>
+                  <tr
+                    key={a.id}
+                    data-account-id={a.id}
+                    className={focusedAccountId === a.id ? "account-row-focused" : ""}
+                  >
                     <td>
                       <label className="checkbox-label">
                         <input
@@ -1161,12 +1235,38 @@ function ConfirmModal({
 
 function StatsTab() {
   const [stats, setStats] = useState<Stats | null>(null);
+  const [accountEmails, setAccountEmails] = useState<Map<number, string>>(new Map());
+  const [selectedRequestId, setSelectedRequestId] = useState<number | null>(null);
+  const [requestDetail, setRequestDetail] = useState<RequestDetail | null>(null);
+  const [requestDetailError, setRequestDetailError] = useState<string | null>(null);
+  const [requestDetailLoading, setRequestDetailLoading] = useState(false);
 
   useEffect(() => {
     const get = () => fetchStats().then((r) => setStats(r.data));
     get();
     const interval = setInterval(get, 5000);
     return () => clearInterval(interval);
+  }, []);
+
+  const openRequestDetail = async (id: number) => {
+    setSelectedRequestId(id);
+    setRequestDetail(null);
+    setRequestDetailError(null);
+    setRequestDetailLoading(true);
+    try {
+      const response = await fetchRequestDetail(id);
+      setRequestDetail(response.data);
+    } catch (error) {
+      setRequestDetailError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRequestDetailLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchAccounts().then((response) => {
+      setAccountEmails(new Map(response.data.map((account) => [account.id, account.email])));
+    });
   }, []);
 
   if (!stats) return <div className="empty-state">加载中...</div>;
@@ -1176,7 +1276,7 @@ function StatsTab() {
       <div className="page-hd">
         <div>
           <div className="page-title">请求统计</div>
-          <div className="page-sub">实时请求监控 · Token 用量追踪</div>
+          <div className="page-sub">实时请求监控 · Token 用量追踪 · 点击请求查看上下文</div>
         </div>
         <div className="page-actions">
           <span className="live-dot">每 5 秒自动刷新</span>
@@ -1270,39 +1370,263 @@ function StatsTab() {
             <div className="section-title">
               最近请求 <span className="section-count-badge">{stats.recentRequests.length}</span>
             </div>
+            <div className="section-meta">Token：上游=真实值 · 混合/估算=本地估算</div>
           </div>
-          <div className="table-card">
+          <div className="table-card stats-table-card">
             <table>
               <thead>
                 <tr>
+                  <th style={{ width: 210 }}>账号</th>
                   <th>模型</th>
                   <th className="table-center" style={{ width: 80 }}>状态</th>
                   <th className="table-center" style={{ width: 80 }}>Token 数</th>
-                  <th className="table-center" style={{ width: 100 }}>耗时</th>
+                  <th className="table-center" style={{ width: 100 }}>首字耗时</th>
+                  <th className="table-center" style={{ width: 100 }}>总耗时</th>
                   <th style={{ width: 160 }}>时间</th>
                 </tr>
               </thead>
               <tbody>
-                {stats.recentRequests.slice(0, 20).map((r: any) => (
-                  <tr key={r.id}>
-                    <td style={{ fontFamily: "ui-monospace,monospace", fontSize: 12 }}>{r.model || "—"}</td>
-                    <td className="table-center">
-                      <span className={`badge ${r.status === "success" ? "badge-active" : "badge-error"}`}>
-                        {r.status === "success" ? "成功" : r.status === "error" ? "错误" : STATUS_LABEL[r.status] || "未知"}
-                      </span>
-                    </td>
-                    <td className="table-center">{r.totalTokens || 0}</td>
-                    <td className="table-center">{r.durationMs ? `${r.durationMs}ms` : "—"}</td>
-                    <td style={{ fontSize: 12, color: "#9a9a9a" }}>{r.createdAt ? new Date(r.createdAt).toLocaleString("zh-CN") : "—"}</td>
-                  </tr>
-                ))}
+                {stats.recentRequests.slice(0, 20).map((r: RecentRequest) => {
+                  const accountEmail = r.accountEmail
+                    || (r.accountId !== null ? accountEmails.get(r.accountId) : undefined);
+                  return (
+                    <tr
+                      key={r.id}
+                      className="stats-request-row"
+                      onClick={() => void openRequestDetail(r.id)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          void openRequestDetail(r.id);
+                        }
+                      }}
+                      tabIndex={0}
+                      title="点击查看请求上下文"
+                    >
+                      <td className="stats-account-cell" title={accountEmail}>
+                        {accountEmail || (r.accountId !== null ? `账号 #${r.accountId}` : "—")}
+                      </td>
+                      <td>
+                        <div className="stats-model-cell">
+                          <code>{r.model || "—"}</code>
+                          <span>推理：{formatReasoningEffort(r.reasoningEffort)}</span>
+                        </div>
+                      </td>
+                      <td className="table-center">
+                        <span className={`badge ${r.status === "success" ? "badge-active" : "badge-error"}`}>
+                          {r.status === "success" ? "成功" : r.status === "error" ? "错误" : STATUS_LABEL[r.status] || "未知"}
+                        </span>
+                      </td>
+                      <td className="table-center">
+                        <div className="stats-token-cell">
+                          <strong>{r.totalTokens || 0}</strong>
+                          <span>{formatTokenSource(r.tokenSource)}</span>
+                        </div>
+                      </td>
+                      <td className="table-center">{formatMilliseconds(r.ttfbMs)}</td>
+                      <td className="table-center">{formatMilliseconds(r.durationMs)}</td>
+                      <td style={{ fontSize: 12, color: "#9a9a9a" }}>{r.createdAt ? new Date(r.createdAt).toLocaleString("zh-CN") : "—"}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
         </>
       )}
+      {selectedRequestId !== null && (
+        <RequestDetailDrawer
+          detail={requestDetail}
+          loading={requestDetailLoading}
+          error={requestDetailError}
+          onClose={() => {
+            setSelectedRequestId(null);
+            setRequestDetail(null);
+            setRequestDetailError(null);
+          }}
+        />
+      )}
     </>
   );
+}
+
+function formatMilliseconds(value: number | null | undefined): string {
+  return typeof value === "number" && Number.isFinite(value) ? `${value}ms` : "—";
+}
+
+function formatReasoningEffort(value: string | null | undefined): string {
+  if (!value) return "默认";
+  return value === "xhigh" ? "XHigh" : value;
+}
+
+function formatTokenSource(value: RecentRequest["tokenSource"]): string {
+  if (value === "upstream") return "上游";
+  if (value === "mixed") return "混合";
+  if (value === "estimated") return "估算";
+  return "未知";
+}
+
+function RequestDetailDrawer({
+  detail,
+  loading,
+  error,
+  onClose,
+}: {
+  detail: RequestDetail | null;
+  loading: boolean;
+  error: string | null;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  return (
+    <div className="session-drawer-backdrop" onClick={onClose}>
+      <aside className="session-drawer request-detail-drawer" onClick={(event) => event.stopPropagation()}>
+        <div className="session-drawer-header">
+          <div>
+            <div className="session-drawer-title">请求详情</div>
+            <div className="session-drawer-sub">
+              {detail?.model || (loading ? "加载中..." : "最近请求")}
+            </div>
+          </div>
+          <button className="session-drawer-close" onClick={onClose} title="关闭">×</button>
+        </div>
+        <div className="session-drawer-body request-detail-body">
+          {loading && <div className="empty-state">正在加载请求上下文...</div>}
+          {error && <div className="request-detail-error">{error}</div>}
+          {detail && (
+            <>
+              <div className="request-detail-meta">
+                <div><span>账号</span><strong>{detail.accountEmail || (detail.accountId ? `账号 #${detail.accountId}` : "—")}</strong></div>
+                <div><span>模型</span><strong>{detail.model || "—"}</strong></div>
+                <div><span>推理强度</span><strong>{formatReasoningEffort(detail.reasoningEffort)}</strong></div>
+                <div><span>Token</span><strong>{detail.totalTokens ?? 0} · {formatTokenSource(detail.tokenSource)}</strong></div>
+                <div><span>首字 / 总耗时</span><strong>{formatMilliseconds(detail.ttfbMs)} / {formatMilliseconds(detail.durationMs)}</strong></div>
+                <div><span>状态</span><strong>{detail.status === "success" ? "成功" : "错误"}</strong></div>
+              </div>
+              {detail.sessionId && (
+                <div className="request-detail-session">
+                  <span>会话 ID</span>
+                  <code>{detail.sessionId}</code>
+                </div>
+              )}
+              <RequestSnapshotSection title="发送上下文" value={detail.requestMessages} />
+              <RequestSnapshotSection title="返回内容" value={detail.responseMessage} />
+              {detail.errorMessage && (
+                <div className="request-detail-section">
+                  <div className="request-detail-section-title">错误信息</div>
+                  <pre className="request-code-block request-error-block">{detail.errorMessage}</pre>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+function RequestSnapshotSection({ title, value }: { title: string; value: unknown }) {
+  const messages = extractSnapshotMessages(value);
+  const truncated = isTruncatedSnapshot(value);
+  if (messages) {
+    return (
+      <div className="request-detail-section">
+        <div className="request-detail-section-title">
+          {title} <span>{messages.length} 条消息</span>
+        </div>
+        {truncated && <div className="request-detail-truncated">内容过长，仅保留了部分快照。</div>}
+        <div className="request-message-list">
+          {messages.length > 0
+            ? messages.map((message, index) => (
+              <RequestMessage key={index} message={message} index={index} />
+            ))
+            : <div className="request-detail-empty">暂无内容</div>}
+        </div>
+      </div>
+    );
+  }
+
+  if (value == null) {
+    return (
+      <div className="request-detail-section">
+        <div className="request-detail-section-title">{title}</div>
+        <div className="request-detail-empty">暂无快照（旧记录可能未保存上下文）</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="request-detail-section">
+      <div className="request-detail-section-title">{title}</div>
+      {truncated && <div className="request-detail-truncated">内容过长，仅保留了部分快照。</div>}
+      <pre className="request-code-block">{formatSnapshot(value)}</pre>
+    </div>
+  );
+}
+
+function RequestMessage({ message, index }: { message: any; index: number }) {
+  const role = typeof message?.role === "string" ? message.role : "unknown";
+  const content = message?.content;
+  const toolCalls = message?.tool_calls;
+  return (
+    <div className={`request-message request-message-${role}`}>
+      <div className="request-message-head">
+        <span>{roleLabel(role)}</span>
+        <em>#{index + 1}</em>
+      </div>
+      <pre className="request-message-content">{formatSnapshot(content)}</pre>
+      {message?.reasoning_content && (
+        <div className="request-reasoning-block">
+          <div>推理内容</div>
+          <pre>{formatSnapshot(message.reasoning_content)}</pre>
+        </div>
+      )}
+      {toolCalls && (
+        <div className="request-tool-block">
+          <div>工具调用</div>
+          <pre>{formatSnapshot(toolCalls)}</pre>
+        </div>
+      )}
+      {message?.tool_call_id && <div className="request-message-tool-id">工具 ID：{message.tool_call_id}</div>}
+    </div>
+  );
+}
+
+function extractSnapshotMessages(value: unknown): any[] | null {
+  if (Array.isArray(value)) return value;
+  if (value && typeof value === "object" && Array.isArray((value as any).messages)) {
+    return (value as any).messages;
+  }
+  return null;
+}
+
+function isTruncatedSnapshot(value: unknown): boolean {
+  return Boolean(value && typeof value === "object" && (value as any).truncated);
+}
+
+function formatSnapshot(value: unknown): string {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2) || "—";
+  } catch {
+    return String(value);
+  }
+}
+
+function roleLabel(role: string): string {
+  return {
+    system: "系统",
+    user: "用户",
+    assistant: "助手",
+    tool: "工具",
+  }[role] || role;
 }
 
 function SettingsTab({ showToast }: { showToast: (msg: string, type?: "success" | "error" | "info") => void }) {

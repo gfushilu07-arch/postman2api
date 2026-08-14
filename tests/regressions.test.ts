@@ -221,6 +221,42 @@ describe("stream error detection", () => {
     expect(result.stream).toBeUndefined();
   });
 
+  test("does not expose a metadata-only response as a successful stream", async () => {
+    const postman = new PostmanProvider() as any;
+    postman.fetchWithTimeout = async () => new Response([
+      `data: ${JSON.stringify({ eventType: "conversation", data: { id: "empty-conversation" } })}`,
+      `data: ${JSON.stringify({
+        eventType: "usage",
+        data: { promptTokens: 9372, completionTokens: 0, totalTokens: 9372 },
+      })}`,
+      "",
+    ].join("\n"), { status: 200, headers: { "content-type": "text/event-stream" } });
+
+    const result = await postman.chatCompletionStream(account, request);
+    expect(result.success).toBe(false);
+    expect(result.retryable).toBe(true);
+    expect(result.error).toContain("empty response");
+    expect(result.stream).toBeUndefined();
+  });
+
+  test("does not return a metadata-only non-streaming response as success", async () => {
+    const postman = new PostmanProvider() as any;
+    postman.fetchWithTimeout = async () => new Response([
+      `data: ${JSON.stringify({ eventType: "conversation", data: { id: "empty-conversation" } })}`,
+      `data: ${JSON.stringify({
+        eventType: "usage",
+        data: { promptTokens: 9372, completionTokens: 0, totalTokens: 9372 },
+      })}`,
+      "",
+    ].join("\n"), { status: 200, headers: { "content-type": "text/event-stream" } });
+
+    const result = await postman.chatCompletion(account, { ...request, stream: false });
+    expect(result.success).toBe(false);
+    expect(result.retryable).toBe(true);
+    expect(result.error).toContain("empty response");
+    expect(result.response).toBeUndefined();
+  });
+
   test("returns the real monthly credit error before exposing an HTTP 200 stream", async () => {
     const postman = new PostmanProvider() as any;
     postman.fetchWithTimeout = async () => new Response(

@@ -1,0 +1,24 @@
+services:
+  postman2api:
+    build:
+      context: .
+      target: runtime
+    image: postman2api:local
+    container_name: postman2api
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PORT: 1930
+      DATABASE_PATH: /data/postman2api.db
+    ports:
+      - "${PORT:-1930}:1930"
+    volumes:
+      - ./data:/data
+    init: true
+    healthcheck:
+      test: ["CMD", "bun", "-e", "const response = await fetch('http://127.0.0.1:1930/health'); if (!response.ok) process.exit(1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s

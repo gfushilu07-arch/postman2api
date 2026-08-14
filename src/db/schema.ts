@@ -23,11 +23,17 @@ export const accounts = sqliteTable("accounts", {
 export const requestLogs = sqliteTable("request_logs", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   accountId: integer("account_id").references(() => accounts.id),
+  sessionId: text("session_id"),
   model: text("model"),
+  reasoningEffort: text("reasoning_effort"),
   promptTokens: integer("prompt_tokens").default(0),
   completionTokens: integer("completion_tokens").default(0),
   totalTokens: integer("total_tokens").default(0),
+  tokenSource: text("token_source"), // upstream | estimated | mixed
+  requestMessages: text("request_messages"),
+  responseMessage: text("response_message"),
   status: text("status").notNull(), // success | error
+  ttfbMs: integer("ttfb_ms"),
   durationMs: integer("duration_ms"),
   errorMessage: text("error_message"),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),

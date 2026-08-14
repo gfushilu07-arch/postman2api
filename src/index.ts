@@ -5,6 +5,7 @@ import { modelsRouter } from "./api/models";
 import { accountsRouter } from "./api/accounts";
 import { statsRouter } from "./api/stats";
 import { settingsRouter } from "./api/settings";
+import { sessionsRouter } from "./api/sessions";
 import { addClient, removeClient } from "./ws";
 import { startWarmupScheduler, stopWarmupScheduler } from "./auth/warmup";
 import { db } from "./db/index";
@@ -33,6 +34,7 @@ app.route("/", modelsRouter);
 app.route("/api/accounts", accountsRouter);
 app.route("/api/stats", statsRouter);
 app.route("/api/settings", settingsRouter);
+app.route("/api/sessions", sessionsRouter);
 
 app.get("/docs/postman-account-token.md", async () => {
   const file = Bun.file("docs/postman-account-token.md");

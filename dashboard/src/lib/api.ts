@@ -71,6 +71,29 @@ export interface AccountImportResponse {
   results: AccountImportResult[];
 }
 
+export interface RecentRequest {
+  id: number;
+  accountId: number | null;
+  accountEmail?: string | null;
+  sessionId?: string | null;
+  model: string | null;
+  reasoningEffort?: string | null;
+  promptTokens: number | null;
+  completionTokens: number | null;
+  totalTokens: number | null;
+  tokenSource?: "upstream" | "estimated" | "mixed" | null;
+  status: string;
+  ttfbMs?: number | null;
+  durationMs?: number | null;
+  errorMessage: string | null;
+  createdAt: string;
+}
+
+export interface RequestDetail extends RecentRequest {
+  requestMessages: unknown;
+  responseMessage: unknown;
+}
+
 export interface Stats {
   totalRequests: number;
   successRequests: number;
@@ -80,7 +103,33 @@ export interface Stats {
   totalTokens: number;
   totalAccounts: number;
   activeAccounts: number;
-  recentRequests: any[];
+  recentRequests: RecentRequest[];
+}
+
+export interface SessionBinding {
+  sessionId: string;
+  accountId: number | null;
+  accountEmail: string | null;
+  accountStatus: string | null;
+  accountEnabled: boolean | null;
+  revision: number;
+  turnCount: number;
+  createdAt: string;
+  updatedAt: string;
+  isInFlight: boolean;
+  abnormal: boolean;
+}
+
+export interface SessionBindingSummary {
+  total: number;
+  active30m: number;
+  boundAccounts: number;
+  abnormal: number;
+}
+
+export interface SessionBindingsResponse {
+  data: SessionBinding[];
+  summary: SessionBindingSummary;
 }
 
 export async function fetchAccounts(): Promise<{ data: Account[] }> {
@@ -141,6 +190,28 @@ export async function toggleAccount(id: number, enabled: boolean): Promise<{ suc
 
 export async function fetchStats(): Promise<{ data: Stats }> {
   return api("/api/stats");
+}
+
+export async function fetchRequestDetail(id: number): Promise<{ data: RequestDetail }> {
+  return api(`/api/stats/requests/${id}`);
+}
+
+export async function fetchSessionBindings(): Promise<SessionBindingsResponse> {
+  return api("/api/sessions");
+}
+
+export async function releaseSessionBindings(sessionIds: string[]): Promise<{ success: boolean; count: number }> {
+  return api(sessionIds.length > 1 ? "/api/sessions/batch-release" : "/api/sessions/release", {
+    method: "POST",
+    body: JSON.stringify({ sessionIds }),
+  });
+}
+
+export async function deleteSessionBindings(sessionIds: string[]): Promise<{ success: boolean; count: number }> {
+  return api("/api/sessions/delete", {
+    method: "POST",
+    body: JSON.stringify({ sessionIds }),
+  });
 }
 
 export async function fetchSettings(): Promise<{ data: Record<string, string> }> {
