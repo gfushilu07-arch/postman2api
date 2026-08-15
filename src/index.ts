@@ -14,11 +14,12 @@ import { eq } from "drizzle-orm";
 import { isDefaultEncryptionKey } from "./utils/crypto";
 import { acceptsApiKey } from "./auth/api-key";
 import { startRetentionScheduler, stopRetentionScheduler } from "./db/retention";
+import { APP_VERSION } from "./version";
 
 const app = new Hono();
 
 // Health check
-app.get("/health", (c) => c.json({ status: "ok", uptime: process.uptime() }));
+app.get("/health", (c) => c.json({ status: "ok", version: APP_VERSION, uptime: process.uptime() }));
 
 // API key auth middleware for /v1/* routes (API consumers)
 app.use("/v1/*", async (c, next) => {
@@ -101,6 +102,7 @@ if (isDefaultEncryptionKey()) {
 }
 
 console.log(`[postman2api] Server running on http://localhost:${config.port}`);
+console.log(`[postman2api] Version: ${APP_VERSION}`);
 console.log(`[postman2api] OpenAI:  http://localhost:${config.port}/v1/chat/completions`);
 console.log(`[postman2api] Anthropic: http://localhost:${config.port}/v1/messages`);
 console.log(`[postman2api] Dashboard: http://localhost:${config.port}/`);

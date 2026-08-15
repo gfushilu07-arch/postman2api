@@ -1,13 +1,16 @@
 import {
   lstatSync,
   mkdirSync,
+  readFileSync,
   readdirSync,
   readlinkSync,
   renameSync,
   rmSync,
   symlinkSync,
+  writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { incrementPatchVersion } from "../src/version";
 
 const root = path.resolve(import.meta.dir, "..");
 const releaseId = `${new Date().toISOString().replace(/[-:.TZ]/g, "")}-${process.pid}`;
@@ -15,13 +18,28 @@ const releasesDir = path.join(root, ".releases");
 const releaseDir = path.join(releasesDir, releaseId);
 const dashboardOut = path.join(releaseDir, "dashboard");
 const serverOut = path.join(releaseDir, "server");
+const packagePath = path.join(root, "package.json");
+const dashboardPackagePath = path.join(root, "dashboard", "package.json");
+const packageSource = readFileSync(packagePath, "utf8");
+const dashboardPackageSource = readFileSync(dashboardPackagePath, "utf8");
+const currentVersion = (JSON.parse(packageSource) as { version: string }).version;
+const releaseVersion = incrementPatchVersion(currentVersion);
 
 mkdirSync(dashboardOut, { recursive: true });
 mkdirSync(serverOut, { recursive: true });
 
-async function run(command: string[], cwd = root): Promise<void> {
+async function run(
+  command: string[],
+  cwd = root,
+  overrides?: Record<string, string>,
+): Promise<void> {
   console.log(`[build] ${command.join(" ")}`);
-  const process = Bun.spawn(command, { cwd, stdout: "inherit", stderr: "inherit" });
+  const process = Bun.spawn(command, {
+    cwd,
+    ...(overrides ? { env: { ...globalThis.process.env, ...overrides } } : {}),
+    stdout: "inherit",
+    stderr: "inherit",
+  });
   const exitCode = await process.exited;
   if (exitCode !== 0) throw new Error(`${command[0]} exited with code ${exitCode}`);
 }
@@ -70,18 +88,30 @@ function pruneReleases(): void {
   }
 }
 
+function setPackageVersion(filePath: string, source: string, version: string): void {
+  const packageJson = JSON.parse(source) as Record<string, unknown>;
+  packageJson.version = version;
+  writeFileSync(filePath, `${JSON.stringify(packageJson, null, 2)}\n`);
+}
+
 try {
+  console.log(`[build] Version ${currentVersion} -> ${releaseVersion}`);
+  setPackageVersion(packagePath, packageSource, releaseVersion);
+  setPackageVersion(dashboardPackagePath, dashboardPackageSource, releaseVersion);
+
   await run(["bunx", "vite", "build", "--outDir", dashboardOut, "--emptyOutDir"], path.join(root, "dashboard"));
   await run([
     "bun", "build", "src/index.ts", "src/db/migrate.ts",
     "--outdir", serverOut, "--target", "bun", "--packages", "external",
-  ]);
+  ], root, { NODE_ENV: "production" });
 
   activateLink(path.join(root, "dashboard", "dist"), path.relative(path.join(root, "dashboard"), dashboardOut));
   activateLink(path.join(root, "dist"), path.relative(root, serverOut));
   pruneReleases();
-  console.log(`[build] Activated immutable release ${releaseId}`);
+  console.log(`[build] Activated immutable release ${releaseId} (v${releaseVersion})`);
 } catch (error) {
+  writeFileSync(packagePath, packageSource);
+  writeFileSync(dashboardPackagePath, dashboardPackageSource);
   rmSync(releaseDir, { recursive: true, force: true });
   throw error;
 }

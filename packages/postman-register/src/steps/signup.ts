@@ -84,6 +84,7 @@ export async function runSignup(ctx: StepContext): Promise<void> {
       () => ps.registrationFormReady(tab),
       "container-center",
     );
+    await ps.waitForTurnstileTokenStable(tab);
 
     const submit = await firstVisible(ps.registrationSubmitButtons(tab), CONFIG.timeouts.short);
     if (!submit) throw new Error("未找到正常的 Register / Create Free Account 提交按钮");
@@ -104,7 +105,11 @@ export async function runSignup(ctx: StepContext): Promise<void> {
       plan.verificationReady = true;
       log.ok("已确认跳转到验证码输入界面，可以开始从邮箱提取验证码");
     } else {
-      log.warn("页面提示 Something went wrong, please refresh the page.");
+      log.warn(
+        outcome === "captcha-failed"
+          ? "服务端拒绝了本次 CAPTCHA token，将刷新页面生成新挑战后重试。"
+          : "页面提示 Something went wrong, please refresh the page.",
+      );
       if (apiResponses.length > 0) {
         lastApiLog = apiResponses.join("\n  ");
         log.warn(`注册接口响应（定位拒绝原因）：\n  ${lastApiLog}`);
@@ -112,7 +117,7 @@ export async function runSignup(ctx: StepContext): Promise<void> {
         lastApiLog = "未捕获到注册接口 POST 响应（请求可能未发出，或被浏览器/扩展拦截）";
         log.warn(lastApiLog);
       }
-      await sleep(500);
+      await sleep(outcome === "captcha-failed" ? 1500 : 500);
     }
   }
   if (!otpReady) {

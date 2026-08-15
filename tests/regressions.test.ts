@@ -740,6 +740,54 @@ describe("request load tracking", () => {
     }
   });
 
+  test("does not fail over or change models after an upstream model mismatch", async () => {
+    const poolAny = pool as any;
+    const providerAny = provider as any;
+    const attemptedAccountIds: number[] = [];
+    const events: string[] = [];
+    const originals = {
+      acquireNextAccount: poolAny.acquireNextAccount,
+      trackRequestEnd: poolAny.trackRequestEnd,
+      markError: poolAny.markError,
+      chatCompletion: providerAny.chatCompletion,
+    };
+
+    try {
+      poolAny.acquireNextAccount = async () => {
+        events.push("start");
+        return { account, leaseId: "lease" };
+      };
+      poolAny.trackRequestEnd = () => events.push("end");
+      poolAny.markError = async () => events.push("error");
+      providerAny.chatCompletion = async (selectedAccount: any, selectedRequest: any) => {
+        attemptedAccountIds.push(selectedAccount.id);
+        expect(selectedRequest.model).toBe("gpt-5.6-sol");
+        return {
+          success: false,
+          modelMismatch: true,
+          error: 'Postman changed requested model from "gpt-5.6-sol" to "GPT_55"',
+        };
+      };
+
+      const routed = await routeRequest({
+        model: "gpt-5.6-sol",
+        messages: [{ role: "user", content: "hello" }],
+        stream: false,
+      }, false);
+
+      expect(routed.result.success).toBe(false);
+      expect(attemptedAccountIds).toEqual([account.id]);
+      expect(events).toEqual(["start", "end", "error"]);
+    } finally {
+      Object.assign(poolAny, {
+        acquireNextAccount: originals.acquireNextAccount,
+        trackRequestEnd: originals.trackRequestEnd,
+        markError: originals.markError,
+      });
+      providerAny.chatCompletion = originals.chatCompletion;
+    }
+  });
+
   test("deduplicates provisioning warmup retries for the same account", () => {
     expect(scheduleProvisioningWarmup(account.id)).toBe(true);
     expect(scheduleProvisioningWarmup(account.id)).toBe(false);

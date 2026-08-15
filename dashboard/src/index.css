@@ -52,7 +52,15 @@ button{cursor:pointer}
 
 .table-card{background:#fff;border-radius:14px;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch}
 .accounts-table-card{max-height:700px;overflow:auto}
-.accounts-table-card thead th{position:sticky;top:0;z-index:1}.table-card>table{width:max-content;min-width:100%;border-collapse:collapse}
+.accounts-table-card thead th{position:sticky;top:0;z-index:1}
+.table-card>table{width:max-content;min-width:100%;border-collapse:collapse}
+.table-card>table.accounts-table{width:100%;min-width:960px;table-layout:fixed}
+.accounts-col-select{width:44px}
+.accounts-col-email{width:280px}
+.accounts-col-status{width:80px}
+.accounts-col-quota{width:auto}
+.accounts-col-recent{width:120px}
+.accounts-col-actions{width:220px}
 .stats-table-card{max-height:700px;overflow:auto}
 .stats-table-card table{min-width:1080px}
 .stats-table-card thead th{position:sticky;top:0;z-index:1}
@@ -80,6 +88,12 @@ td{font-size:13px;padding:13px 16px;vertical-align:middle;color:#3f3f3f}
 tr:hover td{background:#fdfdfd}
 .table-center{text-align:center}
 .tok{font-family:ui-monospace,monospace;font-size:12px;color:#333}
+.account-email-cell{min-width:0;overflow:hidden}
+.account-email{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.account-error-summary{display:flex;align-items:center;gap:5px;min-width:0;max-width:100%;margin-top:4px;color:#a45d56;font-size:11px;line-height:1.35;cursor:help}
+.account-error-summary>svg{width:12px;height:12px;flex:0 0 auto;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.account-error-summary>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.account-error-summary:focus-visible{outline:2px solid rgba(164,93,86,.25);outline-offset:2px;border-radius:3px}
 .empty-state{padding:48px 16px;color:#8a8a8a;font-size:13px;text-align:center}
 
 .badge{display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:999px;font-size:11px;font-weight:500}
@@ -131,6 +145,8 @@ tr:hover td{background:#fdfdfd}
 .filter-chip{height:30px;padding:0 12px;border-radius:999px;font-size:12px;font-weight:500;color:#8f8f8f;background:#f5f5f5;display:inline-flex;align-items:center;gap:6px;transition:background .15s,color .15s;border:none;cursor:pointer}
 .filter-chip:hover{color:#555;background:#f1f1f1}
 .filter-chip.active{background:#111;color:#fff}
+.filter-chip:disabled,.filter-chip-disabled{cursor:not-allowed;opacity:.42}
+.filter-chip:disabled:hover,.filter-chip-disabled:hover{color:#8f8f8f;background:#f5f5f5}
 .filter-chip-count{min-width:18px;height:18px;padding:0 5px;border-radius:999px;background:rgba(0,0,0,.06);font-size:11px;font-weight:600;display:inline-flex;align-items:center;justify-content:center}
 .filter-chip.active .filter-chip-count{background:rgba(255,255,255,.18)}
 

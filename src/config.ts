@@ -23,7 +23,8 @@ function positiveInteger(value: string | undefined, fallback: number): number {
 }
 
 const streamReadTimeoutMs = positiveNumber(process.env.STREAM_READ_TIMEOUT_MS, 300_000);
-const providerRequestTimeoutMs = positiveNumber(process.env.PROVIDER_REQUEST_TIMEOUT_MS, 120_000);
+const providerRequestTimeoutMs = positiveNumber(process.env.PROVIDER_REQUEST_TIMEOUT_MS, 300_000);
+const ttfbTimeoutMs = positiveNumber(process.env.TTFB_TIMEOUT_MS, 120_000);
 const quotaSafeStreamBufferBytes = positiveNumber(
   process.env.QUOTA_SAFE_STREAM_BUFFER_BYTES,
   16 * 1024 * 1024,
@@ -60,6 +61,7 @@ export const config = {
   encryptionKey: process.env.ENCRYPTION_KEY || "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
   streamReadTimeoutMs,
   providerRequestTimeoutMs,
+  ttfbTimeoutMs,
   quotaSafeStreamBufferBytes,
   streamKeepaliveIntervalMs,
   postmanFetchVerbose,
@@ -77,7 +79,6 @@ export const config = {
     255,
     Math.max(1, Math.ceil(Math.max(streamReadTimeoutMs, providerRequestTimeoutMs) / 1000)),
   ),
-  ttfbTimeoutMs: Number(process.env.TTFB_TIMEOUT_MS) || 45_000,
 } as const;
 
 export type Config = typeof config;

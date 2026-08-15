@@ -96,23 +96,9 @@ chatRouter.post("/v1/messages", async (c) => {
 });
 
 function normalizeModel(model: string): string {
-  const m = model.toLowerCase().trim();
-  // Already normalized: claude-opus-4-8 → pass through
-  if (/^(claude|gpt|auto)-/.test(m)) return m;
-  // Anthropic official IDs with dates → strip to base
-  if (m === "claude-sonnet-4-20250514" || m.startsWith("claude-sonnet-4.5")) return "claude-sonnet-4-5";
-  if (m === "claude-opus-4-20250514" || m.startsWith("claude-opus-4.8")) return "claude-opus-4-8";
-  if (m.startsWith("claude-opus-4.7")) return "claude-opus-4-7";
-  if (m.startsWith("claude-opus-4.6")) return "claude-opus-4-6";
-  if (m.startsWith("claude-opus-4.5")) return "claude-opus-4-5";
-  if (m.startsWith("claude-haiku-4.5")) return "claude-haiku-4-5";
-  if (m === "claude-3-5-sonnet-20241022" || m === "claude-3-5-sonnet-latest") return "claude-sonnet-4-5";
-  if (m === "claude-3-opus-20240229") return "claude-opus-4-5";
-  if (m === "claude-3-sonnet-20240229") return "claude-sonnet-4-5";
-  if (m === "claude-3-haiku-20240307") return "claude-haiku-4-5";
-  if (m.startsWith("claude-")) return "claude-sonnet-4-5";
-  if (m.startsWith("gpt-")) return m;
-  return m;
+  // Only normalize casing/whitespace. Never turn one Claude/GPT version into
+  // another version: unsupported model IDs must fail explicitly.
+  return model.trim().toLowerCase();
 }
 
 async function readErrorMessage(response: Response): Promise<string> {

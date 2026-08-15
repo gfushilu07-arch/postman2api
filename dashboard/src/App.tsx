@@ -164,7 +164,9 @@ function Header({ tab, navigateToTab }: { tab: Tab; navigateToTab: (tab: Tab) =>
           ))}
         </nav>
         <div className="admin-header-right">
-          <span className="admin-header-version">v1.0</span>
+          <span className="admin-header-version" title={`当前版本 ${__APP_VERSION__}`}>
+            v{__APP_VERSION__}
+          </span>
         </div>
       </div>
     </header>
@@ -290,7 +292,7 @@ function AccountsTab({
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
-  const [addMode, setAddMode] = useState<"login" | "signup" | "automated" | "import">("login");
+  const [addMode, setAddMode] = useState<"login" | "signup" | "automated" | "import">("import");
   const [filter, setFilter] = useState("all");
   const [confirm, setConfirm] = useState<{ msg: string; action: () => void } | null>(null);
   const [warming, setWarming] = useState<Set<number>>(new Set());
@@ -586,7 +588,7 @@ function AccountsTab({
             </svg>
             {selected.size > 0 ? `批量测试 (${selected.size})` : "批量测试"}
           </button>
-          <button className="page-action-btn page-action-btn-primary" onClick={() => setShowAdd(true)}>
+          <button className="page-action-btn page-action-btn-primary" onClick={() => { setAddMode("import"); setShowAdd(true); }}>
             <svg width="14" height="14" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5" fill="none">
               <line x1="12" y1="5" x2="12" y2="19" />
               <line x1="5" y1="12" x2="19" y2="12" />
@@ -710,7 +712,15 @@ function AccountsTab({
       )}
 
       <div className="table-card accounts-table-card">
-        <table>
+        <table className="accounts-table">
+          <colgroup>
+            <col className="accounts-col-select" />
+            <col className="accounts-col-email" />
+            <col className="accounts-col-status" />
+            <col className="accounts-col-quota" />
+            <col className="accounts-col-recent" />
+            <col className="accounts-col-actions" />
+          </colgroup>
           <thead>
             <tr>
               <th style={{ width: 44 }}>
@@ -755,10 +765,22 @@ function AccountsTab({
                         <span className="checkbox-box" />
                       </label>
                     </td>
-                    <td>
-                      <span className="tok">{a.email}</span>
+                    <td className="account-email-cell">
+                      <span className="tok account-email" title={a.email}>{a.email}</span>
                       {a.errorMessage && (
-                        <div style={{ fontSize: 11, color: "#b66a63", marginTop: 2 }}>{a.errorMessage}</div>
+                        <span
+                          className="account-error-summary"
+                          title={a.errorMessage}
+                          aria-label={`账号错误：${a.errorMessage}`}
+                          tabIndex={0}
+                        >
+                          <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M12 3 2.8 19h18.4L12 3Z" />
+                            <path d="M12 9v4" />
+                            <path d="M12 17h.01" />
+                          </svg>
+                          <span>{a.errorMessage}</span>
+                        </span>
                       )}
                     </td>
                     <td className="table-center">
@@ -1025,16 +1047,35 @@ function AddAccountModal({
       <div className={`modal ${mode === "import" ? "import-modal" : ""}`} onClick={(e) => e.stopPropagation()}>
         <div className="modal-title">添加 Postman 账号</div>
         <div className="filter-bar" style={{ marginBottom: 16 }}>
-          <button className={`filter-chip ${mode === "login" ? "active" : ""}`} onClick={() => setMode("login")}>
+          <button
+            type="button"
+            className={`filter-chip filter-chip-disabled ${mode === "login" ? "active" : ""}`}
+            disabled
+            title="暂不可用，请使用 JSON 导入"
+          >
             已有账号
           </button>
-          <button className={`filter-chip ${mode === "signup" ? "active" : ""}`} onClick={() => setMode("signup")}>
+          <button
+            type="button"
+            className={`filter-chip filter-chip-disabled ${mode === "signup" ? "active" : ""}`}
+            disabled
+            title="暂不可用，请使用 JSON 导入"
+          >
             注册与首次设置
           </button>
-          <button className={`filter-chip ${mode === "automated" ? "active" : ""}`} onClick={() => setMode("automated")}>
+          <button
+            type="button"
+            className={`filter-chip filter-chip-disabled ${mode === "automated" ? "active" : ""}`}
+            disabled
+            title="暂不可用，请使用 JSON 导入"
+          >
             自动化注册
           </button>
-          <button className={`filter-chip ${mode === "import" ? "active" : ""}`} onClick={() => { setMode("import"); setImportResult(null); }}>
+          <button
+            type="button"
+            className={`filter-chip ${mode === "import" ? "active" : ""}`}
+            onClick={() => { setMode("import"); setImportResult(null); }}
+          >
             JSON 导入
           </button>
         </div>

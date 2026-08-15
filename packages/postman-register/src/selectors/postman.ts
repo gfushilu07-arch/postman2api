@@ -216,6 +216,59 @@ function cloudflareSuccessSignals(page: Page): WatchSignal[] {
   ];
 }
 
+/** 读取当前页面各 frame 中已生成的 Turnstile token。 */
+async function currentTurnstileToken(page: Page): Promise<string> {
+  for (const frame of [page.mainFrame(), ...page.frames()]) {
+    const inputs = frame.locator('input[name*="cf-turnstile" i], input[name*="cf-chl" i]');
+    const count = await inputs.count().catch(() => 0);
+    for (let i = 0; i < count; i++) {
+      const value = await inputs.nth(i).inputValue().catch(() => "");
+      if (value.length > 10) return value;
+    }
+  }
+  return "";
+}
+
+/**
+ * 成功动画可能早于 token 完整写入注册表单。提交前要求同一个非空 token
+ * 连续稳定一段时间，避免刚看到 Success 就立即提交而被服务端拒绝。
+ */
+export async function waitForTurnstileTokenStable(
+  page: Page,
+  timeout = CONFIG.timeouts.short,
+  stableMs = 1200,
+): Promise<void> {
+  const deadline = Date.now() + timeout;
+  let lastToken = "";
+  let stableSince = 0;
+
+  while (Date.now() < deadline) {
+    await throwIfCaptchaFailure(page);
+    await throwIfTurnstileFailure(page);
+
+    const token = await currentTurnstileToken(page);
+    if (token) {
+      if (token !== lastToken) {
+        lastToken = token;
+        stableSince = Date.now();
+      } else if (Date.now() - stableSince >= stableMs) {
+        log.info(`Turnstile token 已稳定写入表单（${token.length} 字符）`);
+        return;
+      }
+    } else {
+      lastToken = "";
+      stableSince = 0;
+      if (!(await hasTurnstileMarker(page)) && (await registrationFormReady(page))) {
+        log.info("当前注册页没有 CAPTCHA 组件，无需等待 token");
+        return;
+      }
+    }
+    await sleep(200);
+  }
+
+  throw new Error("Turnstile 显示通过，但 token 未稳定写入注册表单");
+}
+
 /** CAPTCHA 失败会阻止注册继续；必须优先作为终止错误处理。 */
 export function isCaptchaFailureText(text: string): boolean {
   return /Unable to verify the captcha\. Please try again\.|captcha[^\n]{0,120}(?:unable to verify|failed|error|try again)|(?:unable to verify|failed)[^\n]{0,120}captcha/i.test(text);
@@ -417,12 +470,13 @@ async function isOtpPageVisible(page: Page): Promise<boolean> {
 export async function waitForSignupOutcome(
   page: Page,
   timeout = CONFIG.timeouts.medium,
-): Promise<"otp" | "failed"> {
+): Promise<"otp" | "failed" | "captcha-failed"> {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
-    await throwIfCaptchaFailure(page);
     if (await isOtpPageVisible(page)) return "otp";
     const text = await page.locator("body").innerText().catch(() => "");
+    // 提交已经到达服务端，但本次 token 被拒绝。交给注册阶段刷新页面并生成新挑战重试。
+    if (isCaptchaFailureText(text)) return "captcha-failed";
     if (isSignupFatalText(text)) {
       const fragment = text.match(/[^\n]{0,100}(?:already|not allowed|not supported|disposable)[^\n]{0,100}/i)?.[0];
       throw new Error(`注册被 Postman 拒绝（确定性错误，重试无意义）：${fragment ?? "邮箱或用户名不可用"}`);
@@ -430,7 +484,8 @@ export async function waitForSignupOutcome(
     if (isSignupFailureText(text)) return "failed";
     await sleep(500);
   }
-  await throwIfCaptchaFailure(page);
+  const text = await page.locator("body").innerText().catch(() => "");
+  if (isCaptchaFailureText(text)) return "captcha-failed";
   throw new Error("提交后未检测到 OTP 验证界面");
 }
 

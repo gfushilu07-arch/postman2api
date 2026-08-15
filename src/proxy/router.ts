@@ -108,6 +108,14 @@ export async function routeRequest(
         continue;
       }
 
+      // A model mismatch is a hard safety failure. Never retry it on another
+      // model; only the account may change for an explicit account-level
+      // failover signal such as quota/rate limiting.
+      if (result.modelMismatch) {
+        await pool.markError(account.id, result.error || "Postman returned a different model");
+        return { result, account, durationMs, leaseId };
+      }
+
       if (result.retryable) {
         pool.releaseSession(request._sessionId, account.id);
         excludedAccountIds.add(account.id);

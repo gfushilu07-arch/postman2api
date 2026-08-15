@@ -145,6 +145,7 @@ export interface ProviderResult {
   rateLimited?: boolean;
   retryAfterMs?: number;
   retryable?: boolean;
+  modelMismatch?: boolean;
   tokens?: unknown;
 }
 

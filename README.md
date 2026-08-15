@@ -98,6 +98,10 @@ bun run migrate
 bun run start:prod
 ```
 
+每次 `bun run build` 成功后，项目补丁版本会自动加一（例如 `1.0.0` → `1.0.1`）；
+构建失败则恢复原版本。当前版本显示在管理面板右上角，也会由 `/health` 的
+`version` 字段返回。
+
 默认地址：
 
 | 用途 | URL |
@@ -212,14 +216,15 @@ curl http://localhost:1930/v1/messages \
   -H "Content-Type: application/json" \
   -H "anthropic-version: 2023-06-01" \
   -d '{
-    "model": "claude-sonnet-4-20250514",
+    "model": "claude-sonnet-4-5",
     "max_tokens": 1024,
     "messages": [{"role": "user", "content": "Hello!"}],
     "stream": true
   }'
 ```
 
-Anthropic 模型别名会尽可能归一化，例如 `claude-sonnet-4-20250514` 会映射为 `claude-sonnet-4-5`。
+模型只做大小写和首尾空白归一化，不会把请求自动降级、升级或替换为其他模型。
+请使用 `/v1/models` 返回的精确模型 ID；不支持的 Anthropic 官方日期别名会直接返回错误。
 
 ### 模型列表
 
@@ -260,9 +265,9 @@ curl http://localhost:1930/v1/models \
 | `REQUEST_LOG_CLEANUP_THRESHOLD` | `100` | 请求详情达到该数量后触发批量清理。 |
 | `REQUEST_LOG_CLEANUP_INTERVAL_MS` | `600000` | 请求详情与过期会话检查周期，默认 10 分钟。 |
 | `SESSION_RETENTION_DAYS` | `30` | 会话上下文允许的最长闲置天数。 |
-| `TTFB_TIMEOUT_MS` | `45000` | 等待上游响应头的最长时间。 |
+| `TTFB_TIMEOUT_MS` | `120000` | 等待上游响应头的最长时间；MCP 工具较多时首包可能明显变慢。 |
 | `STREAM_READ_TIMEOUT_MS` | `300000` | 流式响应分块之间的最大空闲时间。 |
-| `PROVIDER_REQUEST_TIMEOUT_MS` | `120000` | 未单独设置首包超时时的提供商请求兜底超时。 |
+| `PROVIDER_REQUEST_TIMEOUT_MS` | `300000` | 提供商请求的兜底超时。 |
 | `QUOTA_SAFE_STREAM_BUFFER_BYTES` | `16777216` | 额度安全流式响应的最大缓冲字节数。 |
 | `STREAM_KEEPALIVE_INTERVAL_MS` | `10000` | 缓冲或重试期间发送 SSE 注释心跳的间隔。 |
 | `POSTMAN_FETCH_VERBOSE` | `false` | 输出不含鉴权头和正文的 Postman 请求生命周期日志。 |

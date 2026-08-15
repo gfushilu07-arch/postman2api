@@ -1,3 +1,8 @@
+import {
+  postmanModelMatches,
+  postmanModelMismatchError,
+} from "./models";
+
 export interface PostmanDelta {
   content?: string;
   reasoning_content?: string;
@@ -24,6 +29,11 @@ export interface PostmanTokenUsage {
   totalTokens?: number;
 }
 
+export interface PostmanStreamReaderOptions {
+  requestedModel?: string;
+  selectedModel?: string | null;
+}
+
 const QUOTA_ERROR_PATTERNS = [
   "usage_limit_exceeded",
   "quota_exceeded",
@@ -41,6 +51,8 @@ export function isPostmanQuotaExceeded(value: unknown): boolean {
 }
 
 export class PostmanStreamReader {
+  private readonly requestedModel?: string;
+  private readonly selectedModel?: string | null;
   private finished = false;
   private _quotaExceeded = false;
   private _usage: PostmanUsage | null = null;
@@ -51,9 +63,15 @@ export class PostmanStreamReader {
   private _conversationId: string | null = null;
   private _sawEvent = false;
   private _sawToolCall = false;
+  private _modelMismatch = false;
   private _toolCallIndex = new Map<string, number>();
   private _generatedToolIds = new Map<number, string>();
   private _nextToolCallIndex = 0;
+
+  constructor(options: PostmanStreamReaderOptions = {}) {
+    this.requestedModel = options.requestedModel;
+    this.selectedModel = options.selectedModel;
+  }
 
   get quotaExceeded(): boolean { return this._quotaExceeded; }
   get usage(): PostmanUsage | null { return this._usage; }
@@ -61,6 +79,7 @@ export class PostmanStreamReader {
   get error(): string | null { return this._error; }
   get retryableError(): boolean { return this._retryableError; }
   get actualModel(): string | null { return this._model; }
+  get modelMismatch(): boolean { return this._modelMismatch; }
   get conversationId(): string | null { return this._conversationId; }
   get sawEvent(): boolean { return this._sawEvent; }
 
@@ -78,6 +97,8 @@ export class PostmanStreamReader {
 
     if (!event || typeof event !== "object") return [];
     this._sawEvent = true;
+    this.observeModel(event, event.data);
+    if (this._modelMismatch) return [];
 
     const eventType = String(event.eventType || event.type || "");
     switch (eventType) {
@@ -163,7 +184,6 @@ export class PostmanStreamReader {
 
   private handleTextChunk(data: any): PostmanDelta[] {
     if (!data) return [];
-    if (data.metadata?.model) this._model = data.metadata.model;
     const text = data.textContent;
     if (typeof text === "string" && text.length > 0) {
       return [{ content: text }];
@@ -173,7 +193,6 @@ export class PostmanStreamReader {
 
   private handleThinkingChunk(data: any): PostmanDelta[] {
     if (!data) return [];
-    if (data.metadata?.model) this._model = data.metadata.model;
     const text = data.thinkingContent;
     if (typeof text === "string" && text.length > 0) {
       return [{ reasoning_content: text }];
@@ -184,7 +203,6 @@ export class PostmanStreamReader {
   private handleToolCallChunk(data: any): PostmanDelta[] {
     const toolCalls = extractToolCallEntries(data);
     if (toolCalls.length === 0) return [];
-    if (data.metadata?.model) this._model = data.metadata.model;
 
     const out: PostmanDelta[] = [];
     for (const [position, tc] of toolCalls.entries()) {
@@ -252,6 +270,7 @@ export class PostmanStreamReader {
   }
 
   private handleFailure(data: any): PostmanDelta[] {
+    if (this._modelMismatch) return [];
     this._error = extractFailureMessage(data);
     this._retryableError = this._error === "Unknown Postman error";
     if (this._retryableError) {
@@ -262,6 +281,35 @@ export class PostmanStreamReader {
       this._retryableError = false;
     }
     return [];
+  }
+
+  private observeModel(...values: unknown[]): void {
+    const actualModel = firstNonEmptyString(
+      ...values.flatMap((value) => {
+        if (!value || typeof value !== "object") return [];
+        const data = value as Record<string, any>;
+        return [
+          data.metadata?.model,
+          data.metadata?.modelId,
+          data.metadata?.selectedModel,
+          data.model,
+          data.modelId,
+          data.selectedModel,
+        ];
+      }),
+    );
+    if (!actualModel) return;
+
+    this._model = actualModel;
+    if (
+      this.requestedModel
+      && !this._modelMismatch
+      && !postmanModelMatches(this.requestedModel, this.selectedModel, actualModel)
+    ) {
+      this._modelMismatch = true;
+      this._retryableError = false;
+      this._error = postmanModelMismatchError(this.requestedModel, actualModel);
+    }
   }
 }
 

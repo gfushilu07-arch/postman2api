@@ -108,8 +108,13 @@ export async function handleChatCompletion(
       errorMessage: errMsg,
     });
 
-    if (errMsg.includes("No active accounts") || errMsg.includes("All accounts failed")) {
-      return errorResponse(errMsg, 503);
+    if (
+      errMsg.includes("No active accounts")
+      || errMsg.includes("All accounts failed")
+      || errMsg.startsWith("Invalid model:")
+    ) {
+      const status = errMsg.startsWith("Invalid model:") ? 400 : 503;
+      return errorResponse(errMsg, status);
     }
 
     return errorResponse(errMsg, 500);

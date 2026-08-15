@@ -14,7 +14,12 @@ import {
 } from "./base";
 import type { Account } from "../db/schema";
 import { config } from "../config";
-import { POSTMAN_MODEL_MAP, POSTMAN_MODELS, resolvePostmanModel } from "./models";
+import {
+  POSTMAN_MODEL_MAP,
+  POSTMAN_MODELS,
+  normalizePostmanModelId,
+  resolvePostmanModel,
+} from "./models";
 import {
   isPostmanQuotaExceeded,
   PostmanStreamReader,
@@ -26,8 +31,6 @@ import { getConversationId, setConversationId } from "./conversation-store";
 
 const DEFAULT_APP_VERSION = "12.15.4-260616-1202";
 const CHAT_ENDPOINT = "/_gw/chat";
-const REQUEST_TIMEOUT_MS = 300_000;
-const TTFB_TIMEOUT_MS = 45_000;
 const MAX_QUERY_LEN = 9_500;
 const MAX_CONTEXT_LEN = 800_000;
 
@@ -121,7 +124,7 @@ export class PostmanProvider extends BaseProvider {
   supportedModels: ModelInfo[] = POSTMAN_MODELS;
 
   override ownsModel(model: string): boolean {
-    return model.toLowerCase() in POSTMAN_MODEL_MAP;
+    return normalizePostmanModelId(model) in POSTMAN_MODEL_MAP;
   }
 
   private resolveModel(model: string): string | null | undefined {
@@ -367,7 +370,7 @@ export class PostmanProvider extends BaseProvider {
       const response = await this.fetchWithTimeout(
         `https://${tokens.workspace_subdomain}.postman.co${CHAT_ENDPOINT}`,
         { method: "POST", headers: this.buildHeaders(tokens), body: JSON.stringify(body) },
-        REQUEST_TIMEOUT_MS, TTFB_TIMEOUT_MS, request.signal,
+        config.providerRequestTimeoutMs, config.ttfbTimeoutMs, request.signal,
         { verbose: config.postmanFetchVerbose, context: "Postman chat" },
       );
 
@@ -375,7 +378,10 @@ export class PostmanProvider extends BaseProvider {
       if (statusResult) return statusResult;
 
       const responseText = await response.text();
-      const reader = new PostmanStreamReader();
+      const reader = new PostmanStreamReader({
+        requestedModel: request.model,
+        selectedModel: postmanModel,
+      });
       const deltas: PostmanDelta[] = [];
 
       for (const line of responseText.split("\n")) {
@@ -394,6 +400,7 @@ export class PostmanProvider extends BaseProvider {
         return {
           success: false,
           error: reader.error,
+          ...(reader.modelMismatch ? { modelMismatch: true } : {}),
           ...(reader.retryableError ? { retryable: true } : {}),
         };
       }
@@ -484,7 +491,7 @@ export class PostmanProvider extends BaseProvider {
       const response = await this.fetchWithTimeout(
         `https://${tokens.workspace_subdomain}.postman.co${CHAT_ENDPOINT}`,
         { method: "POST", headers: this.buildHeaders(tokens), body: JSON.stringify(body) },
-        REQUEST_TIMEOUT_MS, TTFB_TIMEOUT_MS, request.signal,
+        config.providerRequestTimeoutMs, config.ttfbTimeoutMs, request.signal,
         { verbose: config.postmanFetchVerbose, context: "Postman chat" },
       );
 
@@ -506,7 +513,10 @@ export class PostmanProvider extends BaseProvider {
       }
 
       const completionId = this.generateId();
-      const pmReader = new PostmanStreamReader();
+      const pmReader = new PostmanStreamReader({
+        requestedModel: request.model,
+        selectedModel: postmanModel,
+      });
       const upstreamReader = response.body.getReader();
       const decoder = new TextDecoder();
       let ndjsonBuffer = "";
@@ -553,6 +563,7 @@ export class PostmanProvider extends BaseProvider {
         return {
           success: false,
           error: pmReader.error,
+          ...(pmReader.modelMismatch ? { modelMismatch: true } : {}),
           ...(pmReader.retryableError ? { retryable: true } : {}),
         };
       }
