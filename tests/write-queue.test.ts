@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { eq } from "drizzle-orm";
+import { eq, like } from "drizzle-orm";
 import { config } from "../src/config";
 import { db } from "../src/db/index";
 import { requestLogs, sessionStates } from "../src/db/schema";
@@ -7,7 +7,6 @@ import {
   clearPersistedSessionConversation,
   flushDatabaseWriteQueue,
   initializeDatabaseWriteQueue,
-  resolveWriteWorkerUrl,
   writeRequestLog,
   writeSessionState,
 } from "../src/db/write-queue";
@@ -27,20 +26,8 @@ afterEach(async () => {
   sessionIds.clear();
 });
 
-describe("SQLite write worker", () => {
-  test("resolves the worker beside source code and inside the compiled db directory", () => {
-    expect(resolveWriteWorkerUrl(
-      "file:///workspace/src/db/write-queue.ts",
-      "/workspace/src/db/write-queue.ts",
-    ).pathname).toBe("/workspace/src/db/write-worker.ts");
-
-    expect(resolveWriteWorkerUrl(
-      "file:///app/dist/index.js",
-      "/app/dist/index.js",
-    ).pathname).toBe("/app/dist/db/write-worker.js");
-  });
-
-  test("starts and writes through the worker using only the test database", async () => {
+describe("SQLite serialized write queue", () => {
+  test("starts and writes using only the test database", async () => {
     expect(config.runtimeEnvironment).toBe("test");
     expect(config.databasePath).not.toBe(
       new URL("../data/postman2api.db", import.meta.url).pathname,
@@ -48,21 +35,37 @@ describe("SQLite write worker", () => {
 
     await initializeDatabaseWriteQueue();
     await writeRequestLog({
-      model: "write-worker-probe",
+      model: "write-queue-probe",
       status: "success",
     });
     await flushDatabaseWriteQueue();
 
     const [saved] = await db.select().from(requestLogs)
-      .where(eq(requestLogs.model, "write-worker-probe"))
+      .where(eq(requestLogs.model, "write-queue-probe"))
       .orderBy(requestLogs.id)
       .limit(1);
     expect(saved?.status).toBe("success");
     if (saved) requestLogIds.add(saved.id);
   });
 
+  test("serializes a burst of concurrent request-log writes without losing rows", async () => {
+    const marker = `write-burst-${crypto.randomUUID()}`;
+    const count = 100;
+
+    await Promise.all(Array.from({ length: count }, (_, index) => writeRequestLog({
+      model: `${marker}-${index}`,
+      status: index % 2 === 0 ? "success" : "error",
+    })));
+    await flushDatabaseWriteQueue();
+
+    const saved = await db.select().from(requestLogs)
+      .where(like(requestLogs.model, `${marker}-%`));
+    expect(saved).toHaveLength(count);
+    for (const row of saved) requestLogIds.add(row.id);
+  });
+
   test("persists and selectively clears the upstream conversation binding", async () => {
-    const sessionId = `codex:write-worker-${crypto.randomUUID()}`;
+    const sessionId = `codex:write-queue-${crypto.randomUUID()}`;
     const accountId = 7_001;
     const conversationUpdatedAt = Math.floor(Date.now() / 1000) - 30;
     sessionIds.add(sessionId);

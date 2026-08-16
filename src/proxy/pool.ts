@@ -38,6 +38,21 @@ export interface AccountLease {
 interface AccountSelection {
   lease?: AccountLease;
   capacityLimited: boolean;
+  cooldownUntil?: number;
+}
+
+export interface AccountAvailability {
+  total: number;
+  enabled: number;
+  disabled: number;
+  active: number;
+  selectable: number;
+  cooling: number;
+  runtimeUnavailable: number;
+  pending: number;
+  exhausted: number;
+  error: number;
+  other: number;
 }
 
 class AccountPool {
@@ -63,10 +78,89 @@ class AccountPool {
   }
 
   async getActiveAccounts(): Promise<Account[]> {
-    const active = await db.select().from(accounts).where(
+    const active = await this.getEnabledActiveAccounts();
+    return active.filter((account) => this.isAccountSelectable(account.id));
+  }
+
+  private async getEnabledActiveAccounts(): Promise<Account[]> {
+    return db.select().from(accounts).where(
       and(eq(accounts.status, "active"), eq(accounts.enabled, true)),
     ).orderBy(accounts.id);
-    return active.filter((account) => this.isAccountSelectable(account.id));
+  }
+
+  async getAccountAvailability(): Promise<AccountAvailability> {
+    const rows = await db.select({
+      id: accounts.id,
+      status: accounts.status,
+      enabled: accounts.enabled,
+    }).from(accounts);
+    const availability: AccountAvailability = {
+      total: rows.length,
+      enabled: 0,
+      disabled: 0,
+      active: 0,
+      selectable: 0,
+      cooling: 0,
+      runtimeUnavailable: 0,
+      pending: 0,
+      exhausted: 0,
+      error: 0,
+      other: 0,
+    };
+
+    for (const row of rows) {
+      if (!row.enabled) {
+        availability.disabled++;
+        continue;
+      }
+      availability.enabled++;
+      switch (row.status) {
+        case "active": {
+          availability.active++;
+          if (this.isAccountSelectable(row.id)) {
+            availability.selectable++;
+          } else if ((this.cooldownByAccountId.get(row.id)?.until ?? 0) > Date.now()) {
+            availability.cooling++;
+          } else {
+            availability.runtimeUnavailable++;
+          }
+          break;
+        }
+        case "pending":
+          availability.pending++;
+          break;
+        case "exhausted":
+          availability.exhausted++;
+          break;
+        case "error":
+          availability.error++;
+          break;
+        default:
+          availability.other++;
+      }
+    }
+
+    return availability;
+  }
+
+  formatNoAccountError(availability: AccountAvailability): string {
+    if (availability.total === 0) {
+      return "No active accounts available: no Postman accounts are configured. Add a Postman account first.";
+    }
+    return [
+      "No active accounts available",
+      `total=${availability.total}`,
+      `enabled=${availability.enabled}`,
+      `active=${availability.active}`,
+      `selectable=${availability.selectable}`,
+      `cooling=${availability.cooling}`,
+      `runtime_unavailable=${availability.runtimeUnavailable}`,
+      `exhausted=${availability.exhausted}`,
+      `error=${availability.error}`,
+      `pending=${availability.pending}`,
+      `disabled=${availability.disabled}`,
+      "Open /accounts and test or re-enable an account",
+    ].join("; ");
   }
 
   async getNextAccount(
@@ -82,18 +176,28 @@ class AccountPool {
     excludedAccountIds: ReadonlySet<number> = new Set(),
   ): Promise<AccountLease | null> {
     const deadline = Date.now() + config.accountCapacityWaitMs;
+    let cooldownLimited = false;
     while (true) {
       const selected = await this.selectNextAccount(sessionId, excludedAccountIds, true);
       if (selected.lease) return selected.lease;
-      if (!selected.capacityLimited) return null;
+      if (!selected.capacityLimited && selected.cooldownUntil === undefined) return null;
+      cooldownLimited = selected.cooldownUntil !== undefined;
 
       const remainingMs = deadline - Date.now();
       if (remainingMs <= 0) {
+        if (cooldownLimited) {
+          throw new Error(
+            `All active accounts are temporarily cooling down; waited ${config.accountCapacityWaitMs}ms`,
+          );
+        }
         throw new Error(
           `All active accounts reached the concurrency limit (${config.accountMaxConcurrency})`,
         );
       }
-      await this.waitForCapacity(remainingMs);
+      const cooldownWaitMs = selected.cooldownUntil === undefined
+        ? remainingMs
+        : Math.max(1, selected.cooldownUntil - Date.now());
+      await this.waitForPoolChange(Math.min(remainingMs, cooldownWaitMs));
     }
   }
 
@@ -104,6 +208,18 @@ class AccountPool {
   ): Promise<AccountSelection> {
     const allActive = (await this.getActiveAccounts())
       .filter((account) => this.isAccountSelectable(account.id));
+    let cooldownChecked = false;
+    let cooldownUntil: number | undefined;
+    const resolveCooldownUntil = async () => {
+      if (cooldownChecked) return cooldownUntil;
+      cooldownChecked = true;
+      const enabledActive = await this.getEnabledActiveAccounts();
+      cooldownUntil = this.nextCooldownUntil(
+        enabledActive.length > 0 ? enabledActive : allActive,
+        excludedAccountIds,
+      );
+      return cooldownUntil;
+    };
     const sessionKey = this.normalizeSessionId(sessionId);
     let binding = sessionKey ? this.getSessionBinding(sessionKey) : undefined;
     if (!binding && sessionKey) {
@@ -167,12 +283,14 @@ class AccountPool {
             capacityLimited: false,
           };
         }
-        return { capacityLimited: true };
+        return { capacityLimited: true, cooldownUntil: await resolveCooldownUntil() };
       }
       this.releaseSession(sessionKey, binding.accountId);
     }
 
-    if (allActive.length === 0) return { capacityLimited: false };
+    if (allActive.length === 0) {
+      return { capacityLimited: false, cooldownUntil: await resolveCooldownUntil() };
+    }
 
     const startIdx = (this.state.lastIndex + 1) % allActive.length;
     let selected: Account | undefined;
@@ -195,7 +313,10 @@ class AccountPool {
 
     if (!selected) {
       const hasCandidate = allActive.some((account) => !excludedAccountIds.has(account.id));
-      return { capacityLimited: reserve && hasCandidate };
+      return {
+        capacityLimited: reserve && hasCandidate,
+        cooldownUntil: await resolveCooldownUntil(),
+      };
     }
     this.state.lastIndex = selectedIdx;
     if (sessionKey) this.bindSession(sessionKey, selected.id);
@@ -327,6 +448,26 @@ class AccountPool {
     return leases.size;
   }
 
+  private nextCooldownUntil(
+    activeAccounts: Account[],
+    excludedAccountIds: ReadonlySet<number>,
+  ): number | undefined {
+    const now = Date.now();
+    let earliest: number | undefined;
+    for (const account of activeAccounts) {
+      if (
+        excludedAccountIds.has(account.id)
+        || this.unavailableAccountIds.has(account.id)
+      ) {
+        continue;
+      }
+      const cooldown = this.cooldownByAccountId.get(account.id);
+      if (!cooldown || cooldown.until <= now) continue;
+      if (earliest === undefined || cooldown.until < earliest) earliest = cooldown.until;
+    }
+    return earliest;
+  }
+
   trackRequestStart(accountId: number, sessionId?: string): string {
     const leaseId = crypto.randomUUID();
     const leases = this.inFlightByAccountId.get(accountId) || new Map<string, InFlightLease>();
@@ -348,7 +489,7 @@ class AccountPool {
     this.notifyCapacityWaiters();
   }
 
-  private waitForCapacity(timeoutMs: number): Promise<void> {
+  private waitForPoolChange(timeoutMs: number): Promise<void> {
     return new Promise((resolve) => {
       let finished = false;
       const finish = () => {
@@ -381,6 +522,7 @@ class AccountPool {
       if (!cooldown || cooldown.until > Date.now()) return;
       this.cooldownByAccountId.delete(accountId);
       this.cooldownTimers.delete(accountId);
+      this.notifyCapacityWaiters();
       broadcast({ type: "account_status", data: { id: accountId, status: "active" } });
     }, Math.max(1, until - Date.now()));
     this.cooldownTimers.set(accountId, timer);

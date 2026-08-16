@@ -491,6 +491,66 @@ describe("account leasing", () => {
     }
   });
 
+  test("does not report no active accounts during a full multi-session burst", async () => {
+    const accountCount = 8;
+    const activeAccounts = await Promise.all(
+      Array.from({ length: accountCount }, (_, index) => createAccount(`burst-${index}`)),
+    );
+    const poolAny = pool as any;
+    const originalGetActiveAccounts = poolAny.getActiveAccounts;
+
+    try {
+      pool.clearRuntimeState();
+      poolAny.getActiveAccounts = async () => activeAccounts;
+      const leaseCount = accountCount * config.accountMaxConcurrency;
+      const leases = await Promise.all(
+        Array.from({ length: leaseCount }, (_, index) => (
+          pool.acquireNextAccount(`parallel-session-${index}`)
+        )),
+      );
+
+      expect(leases.every(Boolean)).toBe(true);
+      const counts = new Map<number, number>();
+      for (const lease of leases) {
+        counts.set(lease!.account.id, (counts.get(lease!.account.id) ?? 0) + 1);
+      }
+      expect([...counts.values()].every((count) => count <= config.accountMaxConcurrency)).toBe(true);
+
+      for (const lease of leases) {
+        pool.trackRequestEnd(lease!.account.id, lease!.leaseId);
+      }
+    } finally {
+      poolAny.getActiveAccounts = originalGetActiveAccounts;
+    }
+  });
+
+  test("reports account status counts when no account is selectable", async () => {
+    const active = await createAccount("availability-active");
+    const exhausted = await createAccount("availability-exhausted");
+    const errored = await createAccount("availability-error");
+    const disabled = await createAccount("availability-disabled");
+
+    await db.update(accounts).set({ status: "exhausted" })
+      .where(eq(accounts.id, exhausted.id));
+    await db.update(accounts).set({ status: "error" })
+      .where(eq(accounts.id, errored.id));
+    await db.update(accounts).set({ enabled: false })
+      .where(eq(accounts.id, disabled.id));
+
+    pool.clearRuntimeState();
+    pool.markCooling(active.id, 60_000, "test cooldown");
+    const availability = await pool.getAccountAvailability();
+
+    expect(availability.total).toBeGreaterThanOrEqual(4);
+    expect(availability.active).toBeGreaterThanOrEqual(1);
+    expect(availability.selectable).toBe(0);
+    expect(availability.cooling).toBeGreaterThanOrEqual(1);
+    expect(availability.exhausted).toBeGreaterThanOrEqual(1);
+    expect(availability.error).toBeGreaterThanOrEqual(1);
+    expect(availability.disabled).toBeGreaterThanOrEqual(1);
+    expect(pool.formatNoAccountError(availability)).toContain("selectable=0");
+  });
+
   test("does not let an old request release a newer lease", () => {
     const poolAny = pool as any;
     const realNow = Date.now;
@@ -544,6 +604,47 @@ describe("account leasing", () => {
       for (const lease of activeLeases) pool.trackRequestEnd(lease.account.id, lease.leaseId);
     } finally {
       poolAny.getActiveAccounts = originalGetActiveAccounts;
+    }
+  });
+
+  test("waits for the earliest account cooldown instead of reporting no active accounts", async () => {
+    const account = await createAccount("cooldown-wait");
+    const poolAny = pool as any;
+    const cooldownMs = 30;
+
+    pool.clearRuntimeState();
+    poolAny.cooldownByAccountId.set(account.id, {
+      until: Date.now() + cooldownMs,
+      reason: "temporary upstream failure",
+    });
+
+    const startedAt = performance.now();
+    const lease = await pool.acquireNextAccount("cooldown-waiting-session");
+
+    expect(lease?.account.id).toBe(account.id);
+    expect(performance.now() - startedAt).toBeGreaterThanOrEqual(cooldownMs - 10);
+    if (lease) pool.trackRequestEnd(lease.account.id, lease.leaseId);
+  });
+
+  test("returns a cooldown-specific error when every account stays cooling past the wait limit", async () => {
+    const account = await createAccount("cooldown-timeout");
+    const poolAny = pool as any;
+    const configAny = config as any;
+    const originalWaitMs = configAny.accountCapacityWaitMs;
+
+    try {
+      pool.clearRuntimeState();
+      configAny.accountCapacityWaitMs = 20;
+      poolAny.cooldownByAccountId.set(account.id, {
+        until: Date.now() + 1_000,
+        reason: "temporary upstream failure",
+      });
+
+      await expect(
+        pool.acquireNextAccount("cooldown-timeout-session"),
+      ).rejects.toThrow("temporarily cooling down");
+    } finally {
+      configAny.accountCapacityWaitMs = originalWaitMs;
     }
   });
 

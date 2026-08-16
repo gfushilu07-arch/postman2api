@@ -152,6 +152,7 @@ export async function handleChatCompletion(
       errMsg.includes("No active accounts")
       || errMsg.includes("All accounts failed")
       || errMsg.includes("reached the concurrency limit")
+      || errMsg.includes("temporarily cooling down")
       || errMsg.startsWith("Invalid model:")
     ) {
       const status = errMsg.startsWith("Invalid model:") ? 400 : 503;

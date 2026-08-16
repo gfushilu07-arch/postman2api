@@ -1,5 +1,5 @@
 import type { NewRequestLog } from "./schema";
-import { config } from "../config";
+import { client } from "./index";
 
 type WriteOperation =
   | { type: "probe" }
@@ -44,73 +44,34 @@ type WriteOperation =
   | { type: "mark_account_used"; accountId: number; timestamp: number }
   | { type: "update_account_tokens"; accountId: number; tokens: string; timestamp: number };
 
-interface WorkerResponse {
-  id: number;
-  success: boolean;
-  error?: string;
-}
-
-let worker: Worker | undefined;
-let nextId = 1;
-const pending = new Map<number, { resolve: () => void; reject: (error: Error) => void }>();
+/**
+ * SQLite already serializes writes per connection. Keeping an additional
+ * Bun Worker connection for writes made the process compete with its own
+ * Drizzle/retention/API writes for the SQLite writer lock. Under concurrent
+ * sessions that amplified "database is locked" waits and made unrelated
+ * account state transitions appear to fail.
+ *
+ * Keep the async queue API, but execute queued writes on the process-wide
+ * SQLite connection. Reads and direct Drizzle writes therefore share the same
+ * connection and are serialized by the event loop without a second writer.
+ */
+let queueTail = Promise.resolve();
+let pending = 0;
 const idleWaiters = new Set<() => void>();
 
 function notifyIdleWaiters(): void {
-  if (pending.size > 0) return;
+  if (pending > 0) return;
   for (const resolve of idleWaiters) resolve();
   idleWaiters.clear();
 }
 
-function failPending(error: Error): void {
-  for (const item of pending.values()) item.reject(error);
-  pending.clear();
-  notifyIdleWaiters();
-}
-
-export function resolveWriteWorkerUrl(
-  moduleUrl = import.meta.url,
-  modulePath = import.meta.path,
-): URL {
-  const sourceMode = modulePath.endsWith(".ts");
-  return new URL(
-    sourceMode ? "./write-worker.ts" : "./db/write-worker.js",
-    moduleUrl,
-  );
-}
-
-function getWorker(): Worker {
-  if (worker) return worker;
-  const workerUrl = resolveWriteWorkerUrl();
-  worker = new Worker(workerUrl.href, { type: "module" });
-  worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
-    const response = event.data;
-    const item = pending.get(response.id);
-    if (!item) return;
-    pending.delete(response.id);
-    if (response.success) item.resolve();
-    else item.reject(new Error(response.error || "SQLite write worker failed"));
-    if (pending.size === 0) {
-      worker?.unref();
-      notifyIdleWaiters();
-    }
-  };
-  worker.onerror = (event) => {
-    const error = new Error(event.message || "SQLite write worker crashed");
-    failPending(error);
-    worker?.terminate();
-    worker = undefined;
-  };
-  worker.unref();
-  return worker;
-}
-
 function enqueue(operation: WriteOperation): Promise<void> {
-  const activeWorker = getWorker();
-  activeWorker.ref();
-  const id = nextId++;
-  return new Promise<void>((resolve, reject) => {
-    pending.set(id, { resolve, reject });
-    activeWorker.postMessage({ id, databasePath: config.databasePath, operation });
+  pending++;
+  const run = queueTail.then(() => execute(operation));
+  queueTail = run.catch(() => {});
+  return run.finally(() => {
+    pending--;
+    notifyIdleWaiters();
   });
 }
 
@@ -185,13 +146,93 @@ export function writeAccountTokens(accountId: number, tokens: unknown): Promise<
 }
 
 export function flushDatabaseWriteQueue(): Promise<void> {
-  if (pending.size === 0) return Promise.resolve();
+  if (pending === 0) return Promise.resolve();
   return new Promise<void>((resolve) => idleWaiters.add(resolve));
 }
 
 export async function closeDatabaseWriteQueue(): Promise<void> {
-  if (!worker) return;
   await flushDatabaseWriteQueue();
-  worker.terminate();
-  worker = undefined;
+}
+
+function execute(operation: WriteOperation): void {
+  switch (operation.type) {
+    case "probe":
+      client.query("SELECT 1").get();
+      return;
+    case "commit_session":
+      client.query(`
+        INSERT INTO session_states (
+          session_id, account_id, conversation_id, conversation_updated_at,
+          messages, turn_count, estimated_tokens, message_chars,
+          revision, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?9)
+        ON CONFLICT(session_id) DO UPDATE SET
+          account_id = excluded.account_id,
+          conversation_id = excluded.conversation_id,
+          conversation_updated_at = excluded.conversation_updated_at,
+          messages = excluded.messages,
+          turn_count = excluded.turn_count,
+          estimated_tokens = excluded.estimated_tokens,
+          message_chars = excluded.message_chars,
+          revision = session_states.revision + 1,
+          updated_at = excluded.updated_at
+      `).run(
+        operation.sessionId,
+        operation.accountId,
+        operation.conversationId,
+        operation.conversationUpdatedAt,
+        operation.messages,
+        operation.turnCount,
+        operation.estimatedTokens,
+        operation.messageChars,
+        operation.timestamp,
+      );
+      return;
+    case "record_request": {
+      const entry = operation.entry;
+      client.query(`
+        INSERT INTO request_logs (
+          account_id, session_id, model, reasoning_effort,
+          prompt_tokens, completion_tokens, total_tokens, token_source,
+          request_messages, response_message, status, ttfb_ms,
+          duration_ms, error_message, created_at
+        ) VALUES (
+          ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15
+        )
+      `).run(
+        entry.accountId,
+        entry.sessionId,
+        entry.model,
+        entry.reasoningEffort,
+        entry.promptTokens,
+        entry.completionTokens,
+        entry.totalTokens,
+        entry.tokenSource,
+        entry.requestMessages,
+        entry.responseMessage,
+        entry.status,
+        entry.ttfbMs,
+        entry.durationMs,
+        entry.errorMessage,
+        entry.createdAt,
+      );
+      return;
+    }
+    case "clear_session_conversation":
+      client.query(`
+        UPDATE session_states
+        SET conversation_id = NULL,
+            conversation_updated_at = NULL,
+            updated_at = ?1
+        WHERE session_id = ?2 AND account_id = ?3
+      `).run(operation.timestamp, operation.sessionId, operation.accountId);
+      return;
+    case "mark_account_used":
+      client.query("UPDATE accounts SET last_used_at = ?1, updated_at = ?1 WHERE id = ?2")
+        .run(operation.timestamp, operation.accountId);
+      return;
+    case "update_account_tokens":
+      client.query("UPDATE accounts SET tokens = ?1, updated_at = ?2 WHERE id = ?3")
+        .run(operation.tokens, operation.timestamp, operation.accountId);
+  }
 }

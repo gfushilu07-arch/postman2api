@@ -1,7 +1,11 @@
 import path from "node:path";
 import { parseLoginBrowserBackend } from "./auth/browser-launcher";
 
-const projectRoot = path.resolve(import.meta.dir, "..");
+// Resolve relative runtime paths from the launch directory, not import.meta.dir.
+// Compiled entry points live at dist/index.js and dist/db/migrate.js, so using
+// their module directories made migration and server processes open different
+// SQLite files. Package scripts and Docker both launch from the project/app root.
+const projectRoot = process.cwd();
 const runtimeEnvironment = process.env.NODE_ENV === "production"
   ? "production"
   : process.env.NODE_ENV === "test"
@@ -85,6 +89,7 @@ export const config = {
     process.env.REQUEST_LOG_CLEANUP_INTERVAL_MS,
     10 * 60 * 1000,
   ),
+  sqliteBusyTimeoutMs: positiveInteger(process.env.SQLITE_BUSY_TIMEOUT_MS, 30_000),
   sessionRetentionDays: positiveInteger(process.env.SESSION_RETENTION_DAYS, 30),
   // Estimated input-token budget. 0 disables local context trimming.
   contextMaxTokens: nonNegativeInteger(process.env.CONTEXT_MAX_TOKENS, 500_000),

@@ -245,7 +245,9 @@ curl http://localhost:1930/v1/models \
 
 不要为所有终端用户复用同一个会话 ID。没有可识别会话标识的请求会按请求均衡分配。
 
-账号被限流时，服务会根据上游 `Retry-After` 进入账号级冷却，并尝试其他可用账号。额度安全流式响应会先缓冲上游输出；如果流中途报告额度耗尽，服务会在内容到达客户端前丢弃不完整结果并切换账号重试。
+账号被限流时，服务会根据上游 `Retry-After` 进入账号级冷却，并尝试其他可用账号。
+如果并发请求使所有账号同时处于短暂冷却，后续请求会等待最早的冷却结束，而不会误报成“未添加账号”。
+额度安全流式响应会先缓冲上游输出；如果流中途报告额度耗尽，服务会在内容到达客户端前丢弃不完整结果并切换账号重试。
 
 ## 主服务：配置
 
@@ -261,6 +263,7 @@ curl http://localhost:1930/v1/models \
 | `DATABASE_PATH` | `./data/postman2api.db` | SQLite 数据库路径。 |
 | `DEV_DATABASE_PATH` | `./data/postman2api.dev.db` | 开发模式专用 SQLite，不会读取正式库。 |
 | `TEST_DATABASE_PATH` | `./data/postman2api.test.db` | 自动化测试专用 SQLite。 |
+| `SQLITE_BUSY_TIMEOUT_MS` | `30000` | SQLite 遇到维护写锁时的最长等待时间；程序使用 WAL 和单写连接队列。 |
 | `REQUEST_LOG_RETAIN_COUNT` | `50` | 请求详情批量清理后保留的最近记录数。 |
 | `REQUEST_LOG_CLEANUP_THRESHOLD` | `100` | 请求详情达到该数量后触发批量清理。 |
 | `REQUEST_LOG_CLEANUP_INTERVAL_MS` | `600000` | 请求详情与过期会话检查周期，默认 10 分钟。 |
@@ -288,6 +291,11 @@ Token 数量采用偏保守估算；若系统指令或最新一轮本身已超�
 数据库按运行环境硬隔离：`bun start`、`bun run dev` 和 `bun run dev:api`
 固定使用 `DEV_DATABASE_PATH`；`bun test` 使用 `TEST_DATABASE_PATH`；只有
 `bun run start:prod` 与 `bun run migrate` 会读取正式的 `DATABASE_PATH`。
+
+SQLite 使用 WAL 模式。程序内的会话状态、请求日志与账号使用时间统一通过同一个
+串行写队列落盘，API、保留策略与写队列不会再通过多个连接互相争抢 SQLite 写锁；
+并发请求仍可同时读取，短小写操作按进入顺序提交。该模式适合当前单实例、多会话
+部署，也避免额外维护 PostgreSQL 服务。
 
 请求详情采用高低水位批量清理：默认超过 100 条时一次清理到最近 50 条，
 累计请求数和 Token 会先归档到汇总表，因此统计概览不会随详情删除而下降。

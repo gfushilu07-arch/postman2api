@@ -69,9 +69,9 @@ async function getApiKey(): Promise<string> {
   return row?.value || config.apiKey;
 }
 
-// Fail fast if the compiled SQLite worker is missing or cannot open the
-// configured database. This also makes Docker's startup health check cover the
-// asynchronous write path used by proxy requests.
+// Fail fast if the configured SQLite database cannot be opened. This also
+// makes Docker's startup health check cover the serialized write queue used by
+// proxy requests.
 await initializeDatabaseWriteQueue();
 
 // Start server

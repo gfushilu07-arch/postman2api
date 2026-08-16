@@ -101,7 +101,7 @@ try {
 
   await run(["bunx", "vite", "build", "--outDir", dashboardOut, "--emptyOutDir"], path.join(root, "dashboard"));
   await run([
-    "bun", "build", "src/index.ts", "src/db/migrate.ts", "src/db/write-worker.ts",
+    "bun", "build", "src/index.ts", "src/db/migrate.ts",
     "--outdir", serverOut, "--target", "bun", "--packages", "external",
   ], root, { NODE_ENV: "production" });
 

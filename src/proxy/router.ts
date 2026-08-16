@@ -54,7 +54,8 @@ export async function routeRequest(
     const lease = await pool.acquireNextAccount(request._sessionId, excludedAccountIds);
     if (!lease) {
       if (excludedAccountIds.size > 0) break;
-      throw new Error("No active accounts available. Add a Postman account first.");
+      const availability = await pool.getAccountAvailability();
+      throw new Error(pool.formatNoAccountError(availability));
     }
     const { account, leaseId } = lease;
 
