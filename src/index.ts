@@ -14,7 +14,10 @@ import { eq } from "drizzle-orm";
 import { isDefaultEncryptionKey } from "./utils/crypto";
 import { acceptsApiKey } from "./auth/api-key";
 import { startRetentionScheduler, stopRetentionScheduler } from "./db/retention";
-import { closeDatabaseWriteQueue } from "./db/write-queue";
+import {
+  closeDatabaseWriteQueue,
+  initializeDatabaseWriteQueue,
+} from "./db/write-queue";
 import { APP_VERSION } from "./version";
 
 const app = new Hono();
@@ -65,6 +68,11 @@ async function getApiKey(): Promise<string> {
   const [row] = await db.select().from(settings).where(eq(settings.key, "api_key")).limit(1);
   return row?.value || config.apiKey;
 }
+
+// Fail fast if the compiled SQLite worker is missing or cannot open the
+// configured database. This also makes Docker's startup health check cover the
+// asynchronous write path used by proxy requests.
+await initializeDatabaseWriteQueue();
 
 // Start server
 const server = Bun.serve({

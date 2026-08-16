@@ -2,6 +2,7 @@ import type { NewRequestLog } from "./schema";
 import { config } from "../config";
 
 type WriteOperation =
+  | { type: "probe" }
   | {
       type: "commit_session";
       sessionId: string;
@@ -58,10 +59,20 @@ function failPending(error: Error): void {
   notifyIdleWaiters();
 }
 
+export function resolveWriteWorkerUrl(
+  moduleUrl = import.meta.url,
+  modulePath = import.meta.path,
+): URL {
+  const sourceMode = modulePath.endsWith(".ts");
+  return new URL(
+    sourceMode ? "./write-worker.ts" : "./db/write-worker.js",
+    moduleUrl,
+  );
+}
+
 function getWorker(): Worker {
   if (worker) return worker;
-  const sourceMode = import.meta.path.endsWith(".ts");
-  const workerUrl = new URL(sourceMode ? "./write-worker.ts" : "./write-worker.js", import.meta.url);
+  const workerUrl = resolveWriteWorkerUrl();
   worker = new Worker(workerUrl.href, { type: "module" });
   worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
     const response = event.data;
@@ -97,6 +108,10 @@ function enqueue(operation: WriteOperation): Promise<void> {
 
 function timestamp(): number {
   return Math.floor(Date.now() / 1000);
+}
+
+export function initializeDatabaseWriteQueue(): Promise<void> {
+  return enqueue({ type: "probe" });
 }
 
 export function writeSessionState(input: {

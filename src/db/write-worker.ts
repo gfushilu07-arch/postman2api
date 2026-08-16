@@ -3,6 +3,7 @@ import { Database } from "bun:sqlite";
 declare const self: Worker;
 
 type WriteOperation =
+  | { type: "probe" }
   | {
       type: "commit_session";
       sessionId: string;
@@ -61,6 +62,9 @@ function execute(request: WriteRequest): void {
   const db = getDatabase(request.databasePath);
   const operation = request.operation;
   switch (operation.type) {
+    case "probe":
+      db.query("SELECT 1").get();
+      return;
     case "commit_session":
       db.query(`
         INSERT INTO session_states (
