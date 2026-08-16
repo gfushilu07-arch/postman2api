@@ -23,8 +23,8 @@ function positiveInteger(value: string | undefined, fallback: number): number {
 }
 
 const streamReadTimeoutMs = positiveNumber(process.env.STREAM_READ_TIMEOUT_MS, 300_000);
-const providerRequestTimeoutMs = positiveNumber(process.env.PROVIDER_REQUEST_TIMEOUT_MS, 300_000);
-const ttfbTimeoutMs = positiveNumber(process.env.TTFB_TIMEOUT_MS, 120_000);
+const providerRequestTimeoutMs = positiveNumber(process.env.PROVIDER_REQUEST_TIMEOUT_MS, 480_000);
+const ttfbTimeoutMs = positiveNumber(process.env.TTFB_TIMEOUT_MS, 480_000);
 const quotaSafeStreamBufferBytes = positiveNumber(
   process.env.QUOTA_SAFE_STREAM_BUFFER_BYTES,
   16 * 1024 * 1024,

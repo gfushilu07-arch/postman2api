@@ -87,6 +87,10 @@ const server = Bun.serve({
       if (bunServer.upgrade(request)) return;
       return new Response("WebSocket upgrade failed", { status: 400 });
     }
+    // Bun's global idle timeout supports at most 255 seconds. Long-running AI
+    // requests may legitimately wait up to the configured 8-minute upstream
+    // header timeout, so disable Bun's shorter idle limit for API consumers.
+    if (url.pathname.startsWith("/v1/")) bunServer.timeout(request, 0);
     return app.fetch(request);
   },
   websocket: {

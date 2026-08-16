@@ -265,9 +265,9 @@ curl http://localhost:1930/v1/models \
 | `REQUEST_LOG_CLEANUP_THRESHOLD` | `100` | 请求详情达到该数量后触发批量清理。 |
 | `REQUEST_LOG_CLEANUP_INTERVAL_MS` | `600000` | 请求详情与过期会话检查周期，默认 10 分钟。 |
 | `SESSION_RETENTION_DAYS` | `30` | 会话上下文允许的最长闲置天数。 |
-| `TTFB_TIMEOUT_MS` | `120000` | 等待上游响应头的最长时间；MCP 工具较多时首包可能明显变慢。 |
+| `TTFB_TIMEOUT_MS` | `480000` | 等待上游响应头的最长时间，默认 8 分钟；MCP 工具较多时首包可能明显变慢。 |
 | `STREAM_READ_TIMEOUT_MS` | `300000` | 流式响应分块之间的最大空闲时间。 |
-| `PROVIDER_REQUEST_TIMEOUT_MS` | `300000` | 提供商请求的兜底超时。 |
+| `PROVIDER_REQUEST_TIMEOUT_MS` | `480000` | 提供商请求的兜底超时，默认 8 分钟。 |
 | `QUOTA_SAFE_STREAM_BUFFER_BYTES` | `16777216` | 额度安全流式响应的最大缓冲字节数。 |
 | `STREAM_KEEPALIVE_INTERVAL_MS` | `10000` | 缓冲或重试期间发送 SSE 注释心跳的间隔。 |
 | `POSTMAN_FETCH_VERBOSE` | `false` | 输出不含鉴权头和正文的 Postman 请求生命周期日志。 |
