@@ -265,6 +265,7 @@ curl http://localhost:1930/v1/models \
 | `REQUEST_LOG_CLEANUP_THRESHOLD` | `100` | 请求详情达到该数量后触发批量清理。 |
 | `REQUEST_LOG_CLEANUP_INTERVAL_MS` | `600000` | 请求详情与过期会话检查周期，默认 10 分钟。 |
 | `SESSION_RETENTION_DAYS` | `30` | 会话上下文允许的最长闲置天数。 |
+| `CONTEXT_MAX_TOKENS` | `500000` | 单次请求的最大估算上下文 Token；超出后从最早的完整轮次开始裁剪，`0` 表示关闭。 |
 | `TTFB_TIMEOUT_MS` | `480000` | 等待上游响应头的最长时间，默认 8 分钟；MCP 工具较多时首包可能明显变慢。 |
 | `STREAM_READ_TIMEOUT_MS` | `300000` | 流式响应分块之间的最大空闲时间。 |
 | `PROVIDER_REQUEST_TIMEOUT_MS` | `480000` | 提供商请求的兜底超时，默认 8 分钟。 |
@@ -275,6 +276,14 @@ curl http://localhost:1930/v1/models \
 | `LOGIN_BROWSER_BACKEND` | `camoufox` | 登录后端，可选 `camoufox` 或 `playwright`。 |
 
 管理面板中的设置会存储在 SQLite 中，并覆盖对应环境变量的默认值。
+
+上下文裁剪不会摘要或截断单条消息，而是从发往 Postman 的请求中从最早的完整对话轮次开始删除。
+系统指令、最新一轮对话以及关联的工具调用与工具结果会作为完整单元保留。
+发生裁剪时，服务会清除原 Postman `conversationId` 并使用裁剪后的上下文创建新会话，
+避免 Postman 上游重新补回已经删除的历史。由于 Postman 未公开模型 tokenizer，
+Token 数量采用偏保守估算；若系统指令或最新一轮本身已超过上限，程序会完整保留它们而不会静默破坏当前请求。
+裁剪不会删除 Codex 的会话标识，也不会覆盖 SQLite 中保存的完整本地会话记录；
+请求成功后，裁剪后的请求与回复会追加回完整本地记录，下一次请求仍会基于完整记录重新计算裁剪范围。
 
 数据库按运行环境硬隔离：`bun start`、`bun run dev` 和 `bun run dev:api`
 固定使用 `DEV_DATABASE_PATH`；`bun test` 使用 `TEST_DATABASE_PATH`；只有

@@ -81,7 +81,11 @@ export async function releaseSessionBindings(sessionIds: string[]): Promise<void
   }).from(sessionStates).where(inArray(sessionStates.sessionId, sessionIds));
 
   for (const row of rows) pool.forgetSession(row.sessionId, row.accountId);
-  await db.update(sessionStates).set({ accountId: null })
+  await db.update(sessionStates).set({
+    accountId: null,
+    conversationId: null,
+    conversationUpdatedAt: null,
+  })
     .where(inArray(sessionStates.sessionId, sessionIds));
 }
 

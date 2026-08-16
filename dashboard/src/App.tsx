@@ -1802,6 +1802,22 @@ function SettingsTab({ showToast }: { showToast: (msg: string, type?: "success" 
             style={{ fontFamily: "ui-monospace,monospace" }}
           />
         </div>
+        <div className="settings-row">
+          <label>上下文裁剪上限（估算 tokens）</label>
+          <div className="hint">
+            默认 500,000。超过后优先删除最早的完整对话轮次，并保留系统指令、最新提问及完整工具调用链。
+            裁剪发生时会自动重建 Postman 上游会话，确保旧上下文不会被补回。填写 0 可关闭裁剪。
+          </div>
+          <input
+            className="input"
+            type="number"
+            min={0}
+            max={10000000}
+            step={1000}
+            value={settings.context_max_tokens ?? "500000"}
+            onChange={(e) => setSettings({ ...settings, context_max_tokens: e.target.value })}
+          />
+        </div>
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>
           <button
             className="dialog-btn dialog-btn-primary"

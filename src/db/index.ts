@@ -55,6 +55,8 @@ sqlite.exec(`CREATE TABLE IF NOT EXISTS settings (
 sqlite.exec(`CREATE TABLE IF NOT EXISTS session_states (
   session_id TEXT PRIMARY KEY,
   account_id INTEGER,
+  conversation_id TEXT,
+  conversation_updated_at INTEGER,
   messages TEXT NOT NULL,
   turn_count INTEGER NOT NULL DEFAULT 0,
   estimated_tokens INTEGER NOT NULL DEFAULT 0,
@@ -107,6 +109,12 @@ if (requestLogColumns.length > 0) {
 const sessionStateColumns = sqlite.query("PRAGMA table_info(session_states);").all() as Array<{ name: string }>;
 if (sessionStateColumns.length > 0) {
   const existingColumns = new Set(sessionStateColumns.map((column) => column.name));
+  if (!existingColumns.has("conversation_id")) {
+    sqlite.exec("ALTER TABLE session_states ADD COLUMN conversation_id TEXT;");
+  }
+  if (!existingColumns.has("conversation_updated_at")) {
+    sqlite.exec("ALTER TABLE session_states ADD COLUMN conversation_updated_at INTEGER;");
+  }
   if (!existingColumns.has("turn_count")) {
     sqlite.exec("ALTER TABLE session_states ADD COLUMN turn_count INTEGER NOT NULL DEFAULT 0;");
     sqlite.exec(`

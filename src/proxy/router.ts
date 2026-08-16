@@ -23,6 +23,9 @@ function isTransientError(error: string): boolean {
     || lower.includes("econnreset")
     || lower.includes("fetch failed")
     || lower.includes("network")
+    || lower.includes("socket")
+    || lower.includes("connection was closed")
+    || lower.includes("disconnected before completion")
     || lower.includes("server error (5");
 }
 
@@ -108,11 +111,17 @@ export async function routeRequest(
         continue;
       }
 
+      // Payload validation, MCP/tool conversion, and Agent Mode input errors
+      // belong to this request. Rotating accounts cannot fix them and used to
+      // poison every account in the pool with the same error.
+      if (result.requestRejected) {
+        return { result, account, durationMs, leaseId };
+      }
+
       // A model mismatch is a hard safety failure. Never retry it on another
       // model; only the account may change for an explicit account-level
       // failover signal such as quota/rate limiting.
       if (result.modelMismatch) {
-        await pool.markError(account.id, result.error || "Postman returned a different model");
         return { result, account, durationMs, leaseId };
       }
 
@@ -143,14 +152,14 @@ export async function routeRequest(
       }
 
       if (isTransientError(result.error || "")) {
-        await pool.markTransientFailure(account.id, result.error || "Transient error");
         // The upstream chat endpoint is a state-changing POST. A reset/timeout can
         // happen after Postman accepted it, so replaying it could duplicate a turn.
         // Only explicit rejection responses handled above (429/auth/quota) retry.
         return { result, account, durationMs, leaseId };
       }
 
-      await pool.markError(account.id, result.error || "Unknown error");
+      // Unknown upstream/request failures are not evidence that credentials are
+      // invalid. Fail the request without permanently disabling the account.
       return { result, account, durationMs, leaseId };
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);

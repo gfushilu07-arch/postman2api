@@ -63,6 +63,8 @@ export const settings = sqliteTable("settings", {
 export const sessionStates = sqliteTable("session_states", {
   sessionId: text("session_id").primaryKey(),
   accountId: integer("account_id"),
+  conversationId: text("conversation_id"),
+  conversationUpdatedAt: integer("conversation_updated_at", { mode: "timestamp" }),
   messages: text("messages").notNull(),
   turnCount: integer("turn_count").notNull().default(0),
   estimatedTokens: integer("estimated_tokens").notNull().default(0),

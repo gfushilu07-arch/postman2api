@@ -84,6 +84,8 @@ async function migrate() {
   await db.run(sql`CREATE TABLE IF NOT EXISTS session_states (
     session_id TEXT PRIMARY KEY,
     account_id INTEGER,
+    conversation_id TEXT,
+    conversation_updated_at INTEGER,
     messages TEXT NOT NULL,
     turn_count INTEGER NOT NULL DEFAULT 0,
     estimated_tokens INTEGER NOT NULL DEFAULT 0,
@@ -96,6 +98,12 @@ async function migrate() {
   const sessionStateColumns = (await db.all(
     sql`PRAGMA table_info(session_states)`,
   )) as Array<{ name: string }>;
+  if (!sessionStateColumns.some((column) => column.name === "conversation_id")) {
+    await db.run(sql`ALTER TABLE session_states ADD COLUMN conversation_id TEXT`);
+  }
+  if (!sessionStateColumns.some((column) => column.name === "conversation_updated_at")) {
+    await db.run(sql`ALTER TABLE session_states ADD COLUMN conversation_updated_at INTEGER`);
+  }
   if (!sessionStateColumns.some((column) => column.name === "turn_count")) {
     await db.run(sql`ALTER TABLE session_states ADD COLUMN turn_count INTEGER NOT NULL DEFAULT 0`);
     await db.run(sql.raw(`
@@ -137,6 +145,20 @@ async function migrate() {
   await db.run(sql`CREATE INDEX IF NOT EXISTS session_states_account_idx ON session_states(account_id)`);
 
   await db.run(sql`INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES ('admin_key', 'postman2api', ${Date.now()})`);
+
+  // 这些错误属于具体请求或 MCP 负载，而不是账号失效。旧版本曾误把账号
+  // 标记为 error；迁移时安全地恢复，避免修复上线后账号仍不可调度。
+  await db.run(sql`
+    UPDATE accounts
+    SET status = 'active', error_message = NULL, updated_at = ${Math.floor(Date.now() / 1000)}
+    WHERE status = 'error'
+      AND enabled = 1
+      AND (
+        lower(COALESCE(error_message, '')) LIKE '%that was unexpected%'
+        OR lower(COALESCE(error_message, '')) LIKE '%agent mode accepts upto 10000 characters%'
+        OR lower(COALESCE(error_message, '')) LIKE '%agent mode accepts up to 10000 characters%'
+      )
+  `);
 
   console.log("[migrate] Done. Tables created: accounts, request_logs, request_stats_totals, settings, session_states");
   client.close();

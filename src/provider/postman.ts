@@ -26,11 +26,24 @@ import {
   type PostmanDelta,
 } from "./sse-stream";
 import type { PostmanTokens } from "./transcript";
-import { extractTextFromMessage, isAnthropicToolResult } from "./transcript";
-import { getConversationId, setConversationId } from "./conversation-store";
+import { isAnthropicToolResult } from "./transcript";
+import {
+  deleteConversationId,
+  getConversationId,
+  setConversationId,
+} from "./conversation-store";
 
 const DEFAULT_APP_VERSION = "12.15.4-260616-1202";
 const CHAT_ENDPOINT = "/_gw/chat";
+// Postman Agent Mode rejects the live query around 10,000 UTF-16 characters.
+// This is only a safe transport threshold for input.query. Complete history
+// remains losslessly preserved in Postman's required two-message seed pair.
+export const POSTMAN_QUERY_SAFE_CHARS = 9_000;
+const RESEEDED_USER_QUERY = "Respond to the latest seeded user message.";
+const RESEEDED_TOOL_QUERY = "Process the latest seeded tool results and continue.";
+const CONTINUE_QUERY = "Continue the conversation.";
+const SEEDED_CONTEXT_ACK =
+  "I have received the complete conversation history and will continue from it.";
 
 const TRANSIENT_ERROR_PATTERNS = [
   "too much data",
@@ -47,6 +60,17 @@ interface PostmanMCPTool {
 }
 
 export interface NormalizedPostmanTool extends PostmanMCPTool {}
+
+export interface PostmanSeedMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+interface SplitMessagesResult {
+  query: string;
+  seedingMessages: PostmanSeedMessage[] | null;
+  conversationId: string | null;
+}
 
 const EMPTY_TOOL_PARAMETERS: Record<string, unknown> = {
   type: "object",
@@ -185,10 +209,10 @@ export class PostmanProvider extends BaseProvider {
     return { "proxy-tools": { tools: mcpTools } };
   }
 
-  private splitMessages(messages: ChatMessage[], conversationId: string | null): {
-    query: string;
-    seedingMessages: [{ role: "user"; content: string }, { role: "assistant"; content: string }] | null;
-  } {
+  private splitMessages(
+    messages: ChatMessage[],
+    conversationId: string | null,
+  ): SplitMessagesResult {
     const lastMsg = messages[messages.length - 1];
     const isToolResultTail = lastMsg?.role === "tool" || isAnthropicToolResult(lastMsg);
     const hasConversationId = Boolean(conversationId);
@@ -197,98 +221,44 @@ export class PostmanProvider extends BaseProvider {
     let queryMsgIdx: number;
 
     if (isToolResultTail) {
-      const toolResultParts: string[] = [];
-      for (let i = messages.length - 1; i >= 0; i--) {
-        const msg = messages[i]!;
-        if (msg.role === "tool") {
-          const text = extractTextFromMessage(msg.content);
-          const tcId = msg.tool_call_id || "";
-          const label = (msg as any).is_error || (msg as any).isError
-            ? "Tool Error"
-            : "Tool Result";
-          toolResultParts.unshift(`[${label} id=${tcId}]\n${text}`);
-          continue;
-        }
-        if (isAnthropicToolResult(msg)) {
-          const content = msg.content;
-          if (Array.isArray(content)) {
-            const messageToolResults: string[] = [];
-            for (const block of content) {
-              if (block?.type === "tool_result") {
-                const toolId = block.tool_use_id || "";
-                const resultContent = typeof block.content === "string"
-                  ? block.content
-                  : Array.isArray(block.content)
-                    ? block.content.filter((b: any) => b?.type === "text").map((b: any) => b.text).join("\n")
-                    : "";
-                const label = block.is_error || block.isError
-                  ? "Tool Error"
-                  : "Tool Result";
-                messageToolResults.push(`[${label} id=${toolId}]\n${resultContent}`);
-              }
-            }
-            toolResultParts.unshift(...messageToolResults);
-          }
-          continue;
-        }
-        break;
-      }
-      const resultsBlock = toolResultParts.join("\n\n");
-
-      if (hasConversationId) {
-        query = `${resultsBlock}\n\nProcess these tool results and continue.`;
-      } else {
-        query = "Continue the conversation.";
-      }
+      const resultsBlock = renderTrailingToolResults(messages);
+      query = `${resultsBlock}\n\nProcess these tool results and continue.`;
       queryMsgIdx = -1;
     } else {
       const idx = findLastIndex(messages, (m) => m.role === "user");
       queryMsgIdx = idx;
-      query = idx >= 0 ? extractTextFromMessage(messages[idx]!.content) : "";
+      query = idx >= 0 ? renderMessageContent(messages[idx]!.content) : CONTINUE_QUERY;
     }
 
-    if (hasConversationId) {
-      return { query, seedingMessages: null };
+    // A normal short turn can continue directly on the persisted Postman
+    // conversation. The local history is intentionally not re-sent here.
+    if (hasConversationId && query.length <= POSTMAN_QUERY_SAFE_CHARS) {
+      return { query, seedingMessages: null, conversationId };
     }
 
-    const contextParts: string[] = [];
-    for (let i = 0; i < messages.length; i++) {
-      const msg = messages[i]!;
-      if (i === queryMsgIdx) continue;
-      const text = extractTextFromMessage(msg.content);
+    // With no usable upstream conversation, preserve the complete local
+    // history in Postman's required two-message seed pair. The gateway rejects
+    // more than two seeding messages, but accepts a large seed body; its 10k
+    // Agent Mode limit applies to the live query instead.
+    //
+    // Tool-result turns must be seeded in full when no conversation exists.
+    // Oversized current turns also move into the seed and start a fresh
+    // Postman conversation. This is lossless transport shaping, not context
+    // truncation, summarization, or a local context-window limit.
+    const seedCurrentTurn = isToolResultTail || query.length > POSTMAN_QUERY_SAFE_CHARS;
+    const seedSource = messages.filter((_message, index) => (
+      seedCurrentTurn || index !== queryMsgIdx
+    ));
+    const seedingMessages = buildSeedingMessages(seedSource);
 
-      if (msg.role === "system") {
-        if (text) contextParts.push(`[System]\n${text}`);
-      } else if (msg.role === "user") {
-        if (text) contextParts.push(`[User]\n${text}`);
-      } else if (msg.role === "assistant") {
-        let block = text ? `[Assistant]\n${text}` : "[Assistant]";
-        if (msg.tool_calls?.length) {
-          const tcSummary = msg.tool_calls
-            .map((tc: any) => {
-              const name = tc.function?.name || tc.name || "unknown";
-              const args = stringifyToolArguments(tc.function?.arguments ?? tc.arguments) || "{}";
-              return `Tool call: ${name}(${args}) [id=${tc.id || "unknown"}]`;
-            })
-            .join("\n");
-          block += "\n" + tcSummary;
-        }
-        contextParts.push(block);
-      } else if (msg.role === "tool") {
-        const tcId = msg.tool_call_id || "unknown";
-        contextParts.push(`Tool result for id=${tcId}:\n${text}`);
-      }
+    if (seedCurrentTurn) {
+      query = isToolResultTail ? RESEEDED_TOOL_QUERY : RESEEDED_USER_QUERY;
     }
-
-    const context = contextParts.join("\n\n");
-    if (!context) return { query, seedingMessages: null };
 
     return {
       query,
-      seedingMessages: [
-        { role: "user" as const, content: context },
-        { role: "assistant" as const, content: "I have the full conversation history above and will continue from where we left off." },
-      ],
+      seedingMessages: seedingMessages.length > 0 ? seedingMessages : null,
+      conversationId: null,
     };
   }
 
@@ -298,8 +268,17 @@ export class PostmanProvider extends BaseProvider {
     postmanModel: string | null,
     accountId: string,
   ): any {
-    const conversationId = getConversationId(accountId, request._sessionId);
-    const { query, seedingMessages } = this.splitMessages(request.messages, conversationId);
+    if (request._resetConversation) {
+      deleteConversationId(accountId, request._sessionId);
+    }
+    const storedConversationId = request._resetConversation
+      ? null
+      : getConversationId(accountId, request._sessionId);
+    const {
+      query,
+      seedingMessages,
+      conversationId,
+    } = this.splitMessages(request.messages, storedConversationId);
     const thirdParty = this.buildThirdPartyTools(request.tools);
     const hasTools = Object.keys(thirdParty).length > 0;
 
@@ -357,6 +336,9 @@ export class PostmanProvider extends BaseProvider {
       },
     };
 
+    if (config.postmanFetchVerbose) {
+      logPostmanPayloadDiagnostics("request", body);
+    }
     return body;
   }
 
@@ -378,8 +360,13 @@ export class PostmanProvider extends BaseProvider {
         { verbose: config.postmanFetchVerbose, context: "Postman chat" },
       );
 
-      const statusResult = this.checkResponseStatus(response);
-      if (statusResult) return statusResult;
+      const statusResult = await this.checkResponseStatus(response);
+      if (statusResult) {
+        if (statusResult.requestRejected) {
+          logPostmanPayloadDiagnostics("rejected", body, statusResult.error);
+        }
+        return statusResult;
+      }
 
       const responseText = await response.text();
       const reader = new PostmanStreamReader({
@@ -401,12 +388,15 @@ export class PostmanProvider extends BaseProvider {
         };
       }
       if (reader.error) {
-        return {
+        const result = {
           success: false,
           error: reader.error,
           ...(reader.modelMismatch ? { modelMismatch: true } : {}),
           ...(reader.retryableError ? { retryable: true } : {}),
+          ...requestErrorMetadata(reader.error),
         };
+        if (result.requestRejected) logPostmanPayloadDiagnostics("rejected", body, reader.error);
+        return result;
       }
       if (reader.conversationId) {
         setConversationId(account.id, request._sessionId, reader.conversationId);
@@ -478,7 +468,10 @@ export class PostmanProvider extends BaseProvider {
         creditsUsed: 0,
       };
     } catch (error) {
-      return { success: false, error: `Postman request failed: ${error instanceof Error ? error.message : String(error)}` };
+      const message = `Postman request failed: ${error instanceof Error ? error.message : String(error)}`;
+      const result = { success: false, error: message, ...requestErrorMetadata(message) };
+      if (result.requestRejected) logPostmanPayloadDiagnostics("rejected", body, message);
+      return result;
     }
   }
 
@@ -499,21 +492,29 @@ export class PostmanProvider extends BaseProvider {
         { verbose: config.postmanFetchVerbose, context: "Postman chat" },
       );
 
-      const statusResult = this.checkResponseStatus(response);
-      if (statusResult) return statusResult;
+      const statusResult = await this.checkResponseStatus(response);
+      if (statusResult) {
+        if (statusResult.requestRejected) {
+          logPostmanPayloadDiagnostics("rejected", body, statusResult.error);
+        }
+        return statusResult;
+      }
       if (!response.body) return { success: false, error: "Postman returned no response body" };
 
       const contentType = response.headers.get("content-type") || "";
       if (contentType.includes("application/json")) {
         const text = await response.text();
         const error = extractUpstreamError(text);
-        return {
+        const result = {
           success: false,
           error,
           ...(isPostmanQuotaExceeded(text) || isPostmanQuotaExceeded(error)
             ? { quotaExhausted: true }
             : {}),
+          ...requestErrorMetadata(error),
         };
+        if (result.requestRejected) logPostmanPayloadDiagnostics("rejected", body, error);
+        return result;
       }
 
       const completionId = this.generateId();
@@ -564,16 +565,22 @@ export class PostmanProvider extends BaseProvider {
       }
       if (pmReader.error) {
         await cancelReader(upstreamReader, pmReader.error);
-        return {
+        const result = {
           success: false,
           error: pmReader.error,
           ...(pmReader.modelMismatch ? { modelMismatch: true } : {}),
           ...(pmReader.retryableError ? { retryable: true } : {}),
+          ...requestErrorMetadata(pmReader.error),
         };
+        if (result.requestRejected) logPostmanPayloadDiagnostics("rejected", body, pmReader.error);
+        return result;
       }
       if (upstreamDone && !pmReader.sawEvent) {
         upstreamReader.releaseLock();
-        return { success: false, error: extractUpstreamError(rawPrefix || ndjsonBuffer) };
+        const error = extractUpstreamError(rawPrefix || ndjsonBuffer);
+        const result = { success: false, error, ...requestErrorMetadata(error) };
+        if (result.requestRejected) logPostmanPayloadDiagnostics("rejected", body, error);
+        return result;
       }
       if (upstreamDone && !initialDeltas.some(isMeaningfulDelta)) {
         upstreamReader.releaseLock();
@@ -771,23 +778,54 @@ export class PostmanProvider extends BaseProvider {
         },
       };
     } catch (error) {
-      return { success: false, error: `Postman stream failed: ${error instanceof Error ? error.message : String(error)}` };
+      const message = `Postman stream failed: ${error instanceof Error ? error.message : String(error)}`;
+      const result = { success: false, error: message, ...requestErrorMetadata(message) };
+      if (result.requestRejected) logPostmanPayloadDiagnostics("rejected", body, message);
+      return result;
     }
   }
 
-  private checkResponseStatus(response: Response): ProviderResult | null {
-    if (response.status === 401 || response.status === 403) return { success: false, error: `Postman auth failed (${response.status})` };
+  private async checkResponseStatus(response: Response): Promise<ProviderResult | null> {
+    if (response.ok) return null;
+    const responseText = await response.text().catch(() => "");
+    const upstreamError = extractUpstreamError(responseText);
+    const suffix = upstreamError === "Postman returned an invalid streaming response"
+      ? ""
+      : `: ${upstreamError}`;
+
+    if (response.status === 401 || response.status === 403) {
+      return {
+        success: false,
+        error: `Postman auth failed (${response.status})${suffix}`,
+        httpStatus: response.status,
+      };
+    }
     if (response.status === 429) {
       return {
         success: false,
-        error: "Postman rate limited",
+        error: `Postman rate limited${suffix}`,
         rateLimited: true,
         retryAfterMs: parseRetryAfterMs(response.headers.get("retry-after")),
+        httpStatus: response.status,
       };
     }
-    if (response.status >= 500) return { success: false, error: `Postman server error (${response.status})` };
-    if (!response.ok) return { success: false, error: `Postman API error (${response.status})` };
-    return null;
+    if (response.status === 402 || isPostmanQuotaExceeded(responseText)) {
+      return {
+        success: false,
+        error: `Postman quota error (${response.status})${suffix}`,
+        quotaExhausted: true,
+        httpStatus: response.status,
+      };
+    }
+    const error = response.status >= 500
+      ? `Postman server error (${response.status})${suffix}`
+      : `Postman API error (${response.status})${suffix}`;
+    return {
+      success: false,
+      error,
+      httpStatus: response.status,
+      ...requestErrorMetadata(error, response.status),
+    };
   }
 
   async refreshToken(_account: Account): Promise<{ success: boolean; tokens?: string; error?: string }> {
@@ -945,6 +983,173 @@ function findLastIndex<T>(arr: T[], predicate: (item: T) => boolean): number {
     if (predicate(arr[i]!)) return i;
   }
   return -1;
+}
+
+export function buildSeedingMessages(messages: ChatMessage[]): PostmanSeedMessage[] {
+  const context = messages
+    .map(renderSeedContextMessage)
+    .filter(Boolean)
+    .join("\n\n");
+  if (!context) return [];
+  return [
+    { role: "user", content: context },
+    { role: "assistant", content: SEEDED_CONTEXT_ACK },
+  ];
+}
+
+function renderSeedMessage(message: ChatMessage): PostmanSeedMessage {
+  if (message.role === "system") {
+    return { role: "user", content: `[System]\n${renderMessageContent(message.content)}` };
+  }
+  if (message.role === "assistant") {
+    const parts: string[] = [];
+    const content = renderMessageContent(message.content);
+    if (content) parts.push(content);
+    const reasoning = (message as any).reasoning_content;
+    if (reasoning !== undefined && reasoning !== null && String(reasoning)) {
+      parts.push(`[Assistant Reasoning]\n${renderUnknownValue(reasoning)}`);
+    }
+    if (message.tool_calls?.length) {
+      parts.push(`[Assistant Tool Calls]\n${renderUnknownValue(message.tool_calls)}`);
+    }
+    return {
+      role: "assistant",
+      content: parts.join("\n\n") || "[Assistant]",
+    };
+  }
+  if (message.role === "tool") {
+    const label = (message as any).is_error || (message as any).isError
+      ? "Tool Error"
+      : "Tool Result";
+    return {
+      role: "user",
+      content: `[${label} id=${message.tool_call_id || ""}]\n${renderMessageContent(message.content)}`,
+    };
+  }
+  return { role: "user", content: renderMessageContent(message.content) };
+}
+
+function renderSeedContextMessage(message: ChatMessage): string {
+  const rendered = renderSeedMessage(message);
+  if (!rendered.content) return "";
+  if (message.role === "system") return rendered.content;
+  if (message.role === "assistant") return `[Assistant]\n${rendered.content}`;
+  if (message.role === "tool" || isAnthropicToolResult(message)) return rendered.content;
+  return `[User]\n${rendered.content}`;
+}
+
+function renderTrailingToolResults(messages: ChatMessage[]): string {
+  const parts: string[] = [];
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]!;
+    if (message.role === "tool" || isAnthropicToolResult(message)) {
+      parts.unshift(renderSeedMessage(message).content);
+      continue;
+    }
+    break;
+  }
+  return parts.join("\n\n");
+}
+
+function renderMessageContent(content: ChatMessage["content"] | null | undefined): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return content == null ? "" : renderUnknownValue(content);
+
+  const parts: string[] = [];
+  for (const block of content) {
+    if (!block || typeof block !== "object") {
+      parts.push(renderUnknownValue(block));
+      continue;
+    }
+    if (
+      ["text", "input_text", "output_text"].includes(String(block.type))
+      && typeof block.text === "string"
+    ) {
+      parts.push(block.text);
+      continue;
+    }
+    if (block.type === "tool_result") {
+      const label = block.is_error || block.isError ? "Tool Error" : "Tool Result";
+      parts.push(
+        `[${label} id=${block.tool_use_id || block.tool_call_id || ""}]\n`
+        + renderUnknownValue(block.content),
+      );
+      continue;
+    }
+    parts.push(renderUnknownValue(block));
+  }
+  return parts.join("\n");
+}
+
+function renderUnknownValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === undefined) return "";
+  try {
+    return JSON.stringify(value) ?? "";
+  } catch {
+    return String(value);
+  }
+}
+
+export function isPostmanRequestRejected(error: unknown, httpStatus?: number): boolean {
+  if (httpStatus !== undefined && [400, 409, 413, 422].includes(httpStatus)) return true;
+  const normalized = String(error || "").toLowerCase();
+  return [
+    "agent mode accepts upto 10000 characters",
+    "agent mode accepts up to 10000 characters",
+    "that was unexpected",
+    "remove any configured mcp servers",
+    "invalid tool schema",
+    "invalid tools schema",
+    "invalid function schema",
+    "tool schema validation",
+    "mcp tool",
+  ].some((pattern) => normalized.includes(pattern));
+}
+
+function requestErrorMetadata(
+  error: unknown,
+  httpStatus?: number,
+): Pick<ProviderResult, "requestRejected" | "httpStatus"> {
+  return {
+    ...(isPostmanRequestRejected(error, httpStatus) ? { requestRejected: true } : {}),
+    ...(httpStatus !== undefined ? { httpStatus } : {}),
+  };
+}
+
+function logPostmanPayloadDiagnostics(
+  phase: "request" | "rejected",
+  body: any,
+  error?: string,
+): void {
+  const seeds = Array.isArray(body?.input?.seedingMessages)
+    ? body.input.seedingMessages
+    : [];
+  const seedChars = seeds.map((seed: any) => (
+    typeof seed?.content === "string" ? seed.content.length : 0
+  ));
+  const tools = body?.clientTools?.thirdParty?.["proxy-tools"]?.tools;
+  const schemas = Array.isArray(tools)
+    ? tools.map((tool: any) => renderUnknownValue(tool?.parameters))
+    : [];
+  const summary = {
+    phase,
+    ...(error ? { error } : {}),
+    queryChars: typeof body?.input?.query === "string" ? body.input.query.length : 0,
+    seedCount: seeds.length,
+    seedTotalChars: seedChars.reduce((total: number, count: number) => total + count, 0),
+    maxSeedChars: seedChars.length > 0 ? Math.max(...seedChars) : 0,
+    restoredConversation: Boolean(body?.input?.conversationId),
+    toolCount: Array.isArray(tools) ? tools.length : 0,
+    toolSchemaTotalChars: schemas.reduce((total: number, schema: string) => total + schema.length, 0),
+    maxToolSchemaChars: schemas.length > 0
+      ? Math.max(...schemas.map((schema: string) => schema.length))
+      : 0,
+    appVersion: DEFAULT_APP_VERSION,
+    nativeToolsHash: body?.clientTools?.nativeToolsHash || "",
+  };
+  const logger = phase === "rejected" ? console.warn : console.debug;
+  logger("[postman] payload diagnostics", summary);
 }
 
 function firstFiniteNumber(...values: unknown[]): number | undefined {

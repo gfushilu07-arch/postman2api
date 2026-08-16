@@ -25,6 +25,7 @@ export interface ChatCompletionRequest {
   signal?: AbortSignal;
   _originalModel?: string;
   _sessionId?: string;
+  _resetConversation?: boolean;
 }
 
 export interface ChatCompletionChoice {
@@ -146,6 +147,12 @@ export interface ProviderResult {
   retryAfterMs?: number;
   retryable?: boolean;
   modelMismatch?: boolean;
+  /**
+   * The upstream rejected this specific request payload. This is not an
+   * account-health signal and must never trigger account rotation/disablement.
+   */
+  requestRejected?: boolean;
+  httpStatus?: number;
   tokens?: unknown;
 }
 

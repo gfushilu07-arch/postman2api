@@ -11,7 +11,12 @@ import { deleteConversationId } from "../provider/conversation-store";
 import { acquireSessionLock } from "./session-lock";
 import { config } from "../config";
 import { normalizeReasoningEffort } from "../provider/base";
-import { writeRequestLog } from "../db/write-queue";
+import {
+  clearPersistedSessionConversation,
+  writeRequestLog,
+} from "../db/write-queue";
+import { trimContextMessages } from "../provider/context-trimmer";
+import { getContextMaxTokens } from "../settings/runtime";
 
 interface ByteStreamReader {
   read(): Promise<{ done: boolean; value?: Uint8Array }>;
@@ -36,7 +41,28 @@ export async function handleChatCompletion(
 
   try {
     const prepared = await prepareSession(body._sessionId, body.messages);
-    body.messages = prepared.messages;
+    const contextMaxTokens = await getContextMaxTokens();
+    const trimmedContext = trimContextMessages(
+      prepared.messages,
+      contextMaxTokens,
+      body.tools,
+    );
+    body.messages = trimmedContext.messages;
+    if (trimmedContext.trimmed) {
+      body._resetConversation = true;
+      if (prepared.accountId !== null) {
+        deleteConversationId(prepared.accountId, body._sessionId);
+        await clearPersistedSessionConversation(body._sessionId, prepared.accountId);
+      }
+      console.info("[context] Trimmed request history", {
+        maxTokens: trimmedContext.maxTokens,
+        estimatedTokensBefore: trimmedContext.estimatedTokensBefore,
+        estimatedTokensAfter: trimmedContext.estimatedTokensAfter,
+        droppedMessages: trimmedContext.droppedMessages,
+        droppedTurns: trimmedContext.droppedTurns,
+        mandatoryTokensExceeded: trimmedContext.mandatoryTokensExceeded,
+      });
+    }
     const routed = await routeRequest(body, stream);
     const { result, account, durationMs } = routed;
     const ttfbMs = Date.now() - requestStartedAt;
@@ -48,6 +74,7 @@ export async function handleChatCompletion(
           model: body.model,
           sessionId: body._sessionId,
           requestMessages: body.messages,
+          sessionHistoryMessages: prepared.messages,
           requestAbort,
           detachClientAbort,
           releaseSessionLock,
@@ -59,6 +86,7 @@ export async function handleChatCompletion(
         return response;
       } catch (error) {
         deleteConversationId(account.id, body._sessionId);
+        await clearPersistedSessionConversation(body._sessionId, account.id);
         pool.trackRequestEnd(account.id, routed.leaseId);
         throw error;
       }
@@ -72,6 +100,7 @@ export async function handleChatCompletion(
           body.messages,
           assistantMessage,
           account.id,
+          prepared.messages,
         );
         pool.touchSession(body._sessionId, account.id);
       }
@@ -105,7 +134,10 @@ export async function handleChatCompletion(
       errorMessage: result.error || "Unknown error",
     });
 
-    return errorResponse(result.error || "Unknown error", 503);
+    return errorResponse(
+      result.error || "Unknown error",
+      providerErrorStatus(result),
+    );
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
     await recordRequest({
@@ -140,6 +172,7 @@ function wrapQuotaSafeStream(
     model: string;
     sessionId?: string;
     requestMessages: ChatMessage[];
+    sessionHistoryMessages: ChatMessage[];
     requestAbort: AbortController;
     detachClientAbort: () => void;
     releaseSessionLock: () => void;
@@ -246,6 +279,7 @@ function wrapQuotaSafeStream(
                 ctx.requestMessages,
                 assistantMessage,
                 attempt.account.id,
+                ctx.sessionHistoryMessages,
               );
               pool.touchSession(ctx.sessionId, attempt.account.id);
             }
@@ -275,6 +309,7 @@ function wrapQuotaSafeStream(
             ? attemptError.message
             : String(attemptError);
           deleteConversationId(attempt.account.id, ctx.sessionId);
+          await clearPersistedSessionConversation(ctx.sessionId, attempt.account.id);
           await recordRequest({
             ...requestLogContext(ctx.request),
             accountId: attempt.account.id,
@@ -380,15 +415,28 @@ function serializeSnapshot(value: unknown): string {
 }
 
 function errorResponse(message: string, status: number): Response {
+  const type = status >= 400 && status < 500
+    ? "invalid_request_error"
+    : status === 503
+      ? "no_available_account"
+      : "upstream_error";
   return new Response(
     JSON.stringify({
       error: {
         message,
-        type: status === 503 ? "no_available_account" : "internal_error",
+        type,
       },
     }),
     { status, headers: { "Content-Type": "application/json" } },
   );
+}
+
+function providerErrorStatus(result: RouteResult["result"]): number {
+  if (result.requestRejected) {
+    return result.httpStatus === 400 ? 400 : 422;
+  }
+  if (result.modelMismatch) return 502;
+  return 502;
 }
 
 export { pool };

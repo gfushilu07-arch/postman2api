@@ -4,10 +4,13 @@ import { sessionStates } from "../db/schema";
 import type { ChatMessage } from "./base";
 import { broadcast } from "../ws/index";
 import { writeSessionState } from "../db/write-queue";
+import { getConversationSnapshot } from "./conversation-store";
+import { estimateMessagesTokens } from "./context-trimmer";
 
 export interface PreparedSession {
   messages: ChatMessage[];
   revision: number;
+  accountId: number | null;
 }
 
 function cloneMessages(messages: ChatMessage[]): ChatMessage[] {
@@ -31,12 +34,8 @@ function serializedMessages(messages: ChatMessage[]): string {
   return JSON.stringify(messages);
 }
 
-function estimateMessageTokens(message: ChatMessage): number {
-  return Math.max(1, Math.ceil(JSON.stringify(message).length / 4)) + 4;
-}
-
 export function estimateSessionTokens(messages: ChatMessage[]): number {
-  return messages.reduce((total, message) => total + estimateMessageTokens(message), 0);
+  return estimateMessagesTokens(messages);
 }
 
 export function sessionMessageChars(messages: ChatMessage[]): number {
@@ -96,6 +95,7 @@ export async function prepareSession(
     return {
       messages: cloneMessages(incomingMessages),
       revision: 0,
+      accountId: null,
     };
   }
 
@@ -105,6 +105,7 @@ export async function prepareSession(
     return {
       messages: cloneMessages(incomingMessages),
       revision: 0,
+      accountId: null,
     };
   }
 
@@ -113,11 +114,13 @@ export async function prepareSession(
     return {
       messages: mergeSessionMessages(stored, incomingMessages),
       revision: row.revision,
+      accountId: row.accountId,
     };
   } catch {
     return {
       messages: cloneMessages(incomingMessages),
       revision: row.revision,
+      accountId: row.accountId,
     };
   }
 }
@@ -127,20 +130,29 @@ export async function commitSession(
   requestMessages: ChatMessage[],
   assistantMessage: ChatMessage,
   accountId: number,
+  // The provider may receive a trimmed copy of the request. Keep the complete
+  // locally merged transcript so a later request can be trimmed again without
+  // permanently deleting the older Codex-side history from SQLite.
+  sessionHistoryMessages: ChatMessage[] = requestMessages,
 ): Promise<void> {
   if (!sessionId) return;
   const sessionMessages = [
-    ...cloneMessages(requestMessages),
+    ...cloneMessages(sessionHistoryMessages),
     ...cloneMessages([assistantMessage]),
   ];
   const messages = serializedMessages(sessionMessages);
   const turnCount = countUserTurns(sessionMessages);
   const estimatedTokens = estimateSessionTokens(sessionMessages);
   const messageChars = messages.length;
+  const conversation = getConversationSnapshot(accountId, sessionId);
 
   await writeSessionState({
     sessionId,
     accountId,
+    conversationId: conversation?.id ?? null,
+    conversationUpdatedAt: conversation
+      ? Math.floor(conversation.updatedAt / 1000)
+      : null,
     messages,
     turnCount,
     estimatedTokens,

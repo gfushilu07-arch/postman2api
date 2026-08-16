@@ -16,6 +16,11 @@ import {
   mergeSessionMessages,
   prepareSession,
 } from "../src/provider/session-state";
+import {
+  clearConversations,
+  getConversationId,
+  setConversationId,
+} from "../src/provider/conversation-store";
 
 const sessions = new Set<string>();
 const accountIds = new Set<number>();
@@ -45,6 +50,7 @@ async function createAccount(label: string) {
 
 afterEach(async () => {
   clearSessionLocks();
+  clearConversations();
   pool.clearRuntimeState();
   await flushDatabaseWriteQueue();
   for (const id of sessions) await deleteSessionState(id);
@@ -72,6 +78,31 @@ describe("persistent session state", () => {
       { role: "user", content: "first question" },
       { role: "assistant", content: "first answer" },
       { role: "user", content: "second question" },
+    ]);
+  });
+
+  test("keeps the full local transcript when the outbound context is trimmed", async () => {
+    const id = sessionId("trimmed-history");
+    const fullHistory = [
+      { role: "user", content: "old question" },
+      { role: "assistant", content: "old answer" },
+      { role: "user", content: "latest question" },
+    ];
+    const outboundHistory = [
+      { role: "user", content: "latest question" },
+    ];
+
+    await commitSession(
+      id,
+      outboundHistory,
+      { role: "assistant", content: "latest answer" },
+      101,
+      fullHistory,
+    );
+
+    expect(await getSessionMessages(id)).toEqual([
+      ...fullHistory,
+      { role: "assistant", content: "latest answer" },
     ]);
   });
 
@@ -177,6 +208,72 @@ describe("persistent session state", () => {
       expect((await pool.getNextAccount(id))?.id).toBe(first.id);
     } finally {
       poolAny.getActiveAccounts = originalGetActiveAccounts;
+    }
+  });
+
+  test("restores a persisted Postman conversation only for its original account", async () => {
+    const id = sessionId("restart-conversation");
+    const first = await createAccount("conversation-first");
+    const second = await createAccount("conversation-second");
+    const poolAny = pool as any;
+    const originalGetActiveAccounts = poolAny.getActiveAccounts;
+
+    try {
+      setConversationId(first.id, id, "persisted-postman-conversation");
+      await commitSession(
+        id,
+        [{ role: "user", content: "remember upstream conversation" }],
+        { role: "assistant", content: "remembered" },
+        first.id,
+      );
+      clearConversations();
+      pool.clearRuntimeState();
+      poolAny.getActiveAccounts = async () => [first, second];
+
+      expect((await pool.getNextAccount(id))?.id).toBe(first.id);
+      expect(getConversationId(first.id, id)).toBe("persisted-postman-conversation");
+      expect(getConversationId(second.id, id)).toBeNull();
+    } finally {
+      poolAny.getActiveAccounts = originalGetActiveAccounts;
+    }
+  });
+
+  test("returns request-level Postman rejections as 422 without disabling the account", async () => {
+    const id = sessionId("request-rejection");
+    const account = await createAccount("request-rejection");
+    const poolAny = pool as any;
+    const providerAny = provider as any;
+    const originals = {
+      getActiveAccounts: poolAny.getActiveAccounts,
+      chatCompletion: providerAny.chatCompletion,
+    };
+
+    try {
+      poolAny.getActiveAccounts = async () => [account];
+      providerAny.chatCompletion = async () => ({
+        success: false,
+        requestRejected: true,
+        httpStatus: 422,
+        error: "That was unexpected :(. Try starting a new chat, or remove any configured MCP servers.",
+      });
+
+      const response = await handleChatCompletion({
+        model: "auto",
+        messages: [{ role: "user", content: "use MCP" }],
+        stream: false,
+        _sessionId: id,
+      });
+      const payload = await response.json() as any;
+      const [savedAccount] = await db.select().from(accounts)
+        .where(eq(accounts.id, account.id)).limit(1);
+
+      expect(response.status).toBe(422);
+      expect(payload.error.type).toBe("invalid_request_error");
+      expect(savedAccount?.status).toBe("active");
+      expect(savedAccount?.errorMessage).toBeNull();
+    } finally {
+      poolAny.getActiveAccounts = originals.getActiveAccounts;
+      providerAny.chatCompletion = originals.chatCompletion;
     }
   });
 
@@ -347,7 +444,7 @@ describe("session execution order", () => {
 });
 
 describe("session context preservation", () => {
-  test("preserves the complete merged history instead of applying a local context budget", () => {
+  test("keeps session merging lossless before the configured context trimmer runs", () => {
     const messages = [
       { role: "system", content: "Always keep this instruction." },
       { role: "user", content: "old question ".repeat(20) },

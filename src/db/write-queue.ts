@@ -7,6 +7,8 @@ type WriteOperation =
       type: "commit_session";
       sessionId: string;
       accountId: number;
+      conversationId: string | null;
+      conversationUpdatedAt: number | null;
       messages: string;
       turnCount: number;
       estimatedTokens: number;
@@ -32,6 +34,12 @@ type WriteOperation =
         errorMessage: string | null;
         createdAt: number;
       };
+    }
+  | {
+      type: "clear_session_conversation";
+      sessionId: string;
+      accountId: number;
+      timestamp: number;
     }
   | { type: "mark_account_used"; accountId: number; timestamp: number }
   | { type: "update_account_tokens"; accountId: number; tokens: string; timestamp: number };
@@ -117,12 +125,27 @@ export function initializeDatabaseWriteQueue(): Promise<void> {
 export function writeSessionState(input: {
   sessionId: string;
   accountId: number;
+  conversationId: string | null;
+  conversationUpdatedAt: number | null;
   messages: string;
   turnCount: number;
   estimatedTokens: number;
   messageChars: number;
 }): Promise<void> {
   return enqueue({ type: "commit_session", ...input, timestamp: timestamp() });
+}
+
+export function clearPersistedSessionConversation(
+  sessionId: string | undefined,
+  accountId: number,
+): Promise<void> {
+  if (!sessionId) return Promise.resolve();
+  return enqueue({
+    type: "clear_session_conversation",
+    sessionId,
+    accountId,
+    timestamp: timestamp(),
+  });
 }
 
 export function writeRequestLog(entry: NewRequestLog): Promise<void> {

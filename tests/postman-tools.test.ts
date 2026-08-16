@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { PostmanProvider, normalizePostmanTools } from "../src/provider/postman";
+import {
+  POSTMAN_QUERY_SAFE_CHARS,
+  PostmanProvider,
+  buildSeedingMessages,
+  isPostmanRequestRejected,
+  normalizePostmanTools,
+} from "../src/provider/postman";
 import { PostmanStreamReader } from "../src/provider/sse-stream";
 import { config } from "../src/config";
 import {
@@ -572,6 +578,207 @@ describe("Postman tool compatibility", () => {
     expect(sessionB.clientTools.thirdParty).toEqual({});
     expect(JSON.stringify(sessionB)).not.toContain("exec_command");
     expect(JSON.stringify(sessionB)).not.toContain("conversation-a");
+  });
+
+  test("seeds long history as Postman's required lossless two-message pair", () => {
+    const provider = new PostmanProvider() as any;
+    const systemText = "system-history-".repeat(1_500);
+    const oldQuestion = "old-question-".repeat(1_300);
+    const oldAnswer = "old-answer-".repeat(1_400);
+    const toolArguments = JSON.stringify({ payload: "tool-argument-".repeat(900) });
+    const body = provider.buildRequestBody(
+      {
+        model: "auto",
+        _sessionId: "codex:long-history",
+        messages: [
+          { role: "system", content: systemText },
+          { role: "user", content: oldQuestion },
+          {
+            role: "assistant",
+            content: oldAnswer,
+            tool_calls: [{
+              id: "call-long",
+              type: "function",
+              function: { name: "long_tool", arguments: toolArguments },
+            }],
+          },
+          { role: "user", content: "latest short question" },
+        ],
+      },
+      {
+        postman_sid: "sid",
+        user_id: "user",
+        workspace_id: "workspace",
+        workspace_subdomain: "team",
+      },
+      null,
+      String(account.id),
+    );
+
+    const seeds = body.input.seedingMessages;
+    const seededText = seeds[0].content;
+    expect(body.input.query).toBe("latest short question");
+    expect(body.input.conversationId).toBeNull();
+    expect(seeds).toHaveLength(2);
+    expect(seeds.map((seed: any) => seed.role)).toEqual(["user", "assistant"]);
+    expect(seededText).toContain(systemText);
+    expect(seededText).toContain(oldQuestion);
+    expect(seededText).toContain(oldAnswer);
+    const serializedToolCalls = seededText.split("[Assistant Tool Calls]\n")[1];
+    expect(serializedToolCalls).toBeDefined();
+    expect(JSON.parse(serializedToolCalls!)[0].function.arguments).toBe(toolArguments);
+    expect(seededText).not.toContain("latest short question");
+  });
+
+  test("moves an oversized latest question into lossless seeds even with an existing conversation", () => {
+    const provider = new PostmanProvider() as any;
+    const prefix = "x".repeat(POSTMAN_QUERY_SAFE_CHARS - 1);
+    const latestQuestion = `${prefix}😀${"y".repeat(POSTMAN_QUERY_SAFE_CHARS + 50)}`;
+    setConversationId(account.id, "codex:oversized-current", "old-conversation");
+
+    const body = provider.buildRequestBody(
+      {
+        model: "auto",
+        _sessionId: "codex:oversized-current",
+        messages: [
+          { role: "user", content: "earlier question" },
+          { role: "assistant", content: "earlier answer" },
+          { role: "user", content: latestQuestion },
+        ],
+      },
+      {
+        postman_sid: "sid",
+        user_id: "user",
+        workspace_id: "workspace",
+        workspace_subdomain: "team",
+      },
+      null,
+      String(account.id),
+    );
+
+    const seeds = body.input.seedingMessages;
+    expect(body.input.conversationId).toBeNull();
+    expect(body.input.query).toBe("Respond to the latest seeded user message.");
+    expect(seeds).toHaveLength(2);
+    expect(seeds[0].content).toContain(latestQuestion);
+    expect(body.input.query.length).toBeLessThanOrEqual(POSTMAN_QUERY_SAFE_CHARS);
+  });
+
+  test("starts a fresh Postman conversation after local context trimming", () => {
+    const provider = new PostmanProvider() as any;
+    setConversationId(account.id, "codex:trimmed-context", "stale-full-conversation");
+
+    const body = provider.buildRequestBody(
+      {
+        model: "auto",
+        _sessionId: "codex:trimmed-context",
+        _resetConversation: true,
+        messages: [
+          { role: "system", content: "Keep the system instruction." },
+          { role: "user", content: "Only the retained recent context." },
+        ],
+      },
+      {
+        postman_sid: "sid",
+        user_id: "user",
+        workspace_id: "workspace",
+        workspace_subdomain: "team",
+      },
+      null,
+      String(account.id),
+    );
+
+    expect(body.input.conversationId).toBeNull();
+    expect(body.input.seedingMessages).toHaveLength(2);
+    expect(body.input.query).toBe("Only the retained recent context.");
+    expect(body.input.seedingMessages[0].content).toContain("Keep the system instruction.");
+    expect(getConversationId(account.id, "codex:trimmed-context")).toBeNull();
+  });
+
+  test("keeps tool results when no Postman conversation can be restored", () => {
+    const provider = new PostmanProvider() as any;
+    const toolResult = "tool-result-".repeat(1_100);
+    const body = provider.buildRequestBody(
+      {
+        model: "auto",
+        _sessionId: "codex:tool-result-after-restart",
+        messages: [
+          { role: "user", content: "run the tool" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [{
+              id: "call-after-restart",
+              type: "function",
+              function: { name: "shell", arguments: "{\"cmd\":\"pwd\"}" },
+            }],
+          },
+          {
+            role: "tool",
+            tool_call_id: "call-after-restart",
+            content: toolResult,
+          },
+        ],
+      },
+      {
+        postman_sid: "sid",
+        user_id: "user",
+        workspace_id: "workspace",
+        workspace_subdomain: "team",
+      },
+      null,
+      String(account.id),
+    );
+
+    const seededText = body.input.seedingMessages
+      .map((seed: any) => seed.content)
+      .join("");
+    expect(body.input.query).toBe("Process the latest seeded tool results and continue.");
+    expect(seededText).toContain("[Tool Result id=call-after-restart]");
+    expect(seededText).toContain(toolResult);
+  });
+
+  test("always emits exactly two seed messages without dropping source content", () => {
+    const messages = [
+      { role: "system" as const, content: "system" },
+      { role: "user" as const, content: "question" },
+      { role: "assistant" as const, content: "answer" },
+      { role: "tool" as const, tool_call_id: "call-1", content: "tool output" },
+    ];
+    const seeds = buildSeedingMessages(messages);
+    expect(seeds).toHaveLength(2);
+    expect(seeds.map((seed) => seed.role)).toEqual(["user", "assistant"]);
+    for (const message of messages) {
+      expect(seeds[0]!.content).toContain(String(message.content));
+    }
+  });
+
+  test("classifies Agent Mode and MCP payload failures as request-level errors", async () => {
+    expect(isPostmanRequestRejected(
+      "Agent Mode accepts upto 10000 characters as input.",
+    )).toBe(true);
+    expect(isPostmanRequestRejected(
+      "That was unexpected :(. Try starting a new chat, or remove any configured MCP servers.",
+    )).toBe(true);
+
+    const provider = new PostmanProvider() as any;
+    provider.fetchWithTimeout = async () => new Response(
+      `data: ${JSON.stringify({
+        eventType: "failure",
+        data: {
+          userMessage: "That was unexpected :(. Try starting a new chat, or remove any configured MCP servers.",
+        },
+      })}\n\n`,
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+
+    const result = await provider.chatCompletionStream(account, {
+      model: "gpt-5.6-sol",
+      messages: [{ role: "user", content: "use a tool" }],
+      stream: true,
+    });
+    expect(result.success).toBe(false);
+    expect(result.requestRejected).toBe(true);
   });
 });
 

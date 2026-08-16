@@ -2,7 +2,7 @@ const CONVERSATION_TTL_MS = 6 * 60 * 60 * 1000;
 const MAX_CONVERSATIONS = 10_000;
 const MAX_SCOPED_SESSION_ID_LENGTH = 320;
 
-interface ConversationEntry {
+export interface ConversationEntry {
   id: string;
   updatedAt: number;
 }
@@ -30,10 +30,27 @@ export function getConversationId(accountId: number | string, sessionId?: string
   return entry.id;
 }
 
+export function getConversationSnapshot(
+  accountId: number | string,
+  sessionId?: string,
+): ConversationEntry | null {
+  const key = conversationKey(accountId, sessionId);
+  if (!key) return null;
+
+  const entry = conversations.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.updatedAt > CONVERSATION_TTL_MS) {
+    conversations.delete(key);
+    return null;
+  }
+  return { ...entry };
+}
+
 export function setConversationId(
   accountId: number | string,
   sessionId: string | undefined,
   conversationId: string,
+  updatedAt = Date.now(),
 ): void {
   const key = conversationKey(accountId, sessionId);
   if (!key || !conversationId) return;
@@ -43,7 +60,26 @@ export function setConversationId(
     if (oldestKey) conversations.delete(oldestKey);
   }
   conversations.delete(key);
-  conversations.set(key, { id: conversationId, updatedAt: Date.now() });
+  conversations.set(key, { id: conversationId, updatedAt });
+}
+
+export function restoreConversationId(
+  accountId: number | string,
+  sessionId: string | undefined,
+  conversationId: string | null | undefined,
+  updatedAt: Date | number | null | undefined,
+): boolean {
+  if (!conversationId || updatedAt === null || updatedAt === undefined) return false;
+  const timestamp = updatedAt instanceof Date
+    ? updatedAt.getTime()
+    : updatedAt < 1_000_000_000_000
+      ? updatedAt * 1000
+      : updatedAt;
+  if (!Number.isFinite(timestamp) || Date.now() - timestamp > CONVERSATION_TTL_MS) {
+    return false;
+  }
+  setConversationId(accountId, sessionId, conversationId, timestamp);
+  return true;
 }
 
 export function deleteConversationId(

@@ -777,11 +777,72 @@ describe("request load tracking", () => {
 
       expect(routed.result.success).toBe(false);
       expect(attemptedAccountIds).toEqual([account.id]);
-      expect(events).toEqual(["start", "end", "error"]);
+      expect(events).toEqual(["start", "end"]);
     } finally {
       Object.assign(poolAny, {
         acquireNextAccount: originals.acquireNextAccount,
         trackRequestEnd: originals.trackRequestEnd,
+        markError: originals.markError,
+      });
+      providerAny.chatCompletion = originals.chatCompletion;
+    }
+  });
+
+  test("does not rotate or disable accounts for Agent Mode and MCP request failures", async () => {
+    const poolAny = pool as any;
+    const providerAny = provider as any;
+    const events: string[] = [];
+    const attempts: string[] = [];
+    const originals = {
+      acquireNextAccount: poolAny.acquireNextAccount,
+      trackRequestEnd: poolAny.trackRequestEnd,
+      releaseSession: poolAny.releaseSession,
+      markError: poolAny.markError,
+      chatCompletion: providerAny.chatCompletion,
+    };
+    const errors = [
+      "Agent Mode accepts upto 10000 characters as input.",
+      "That was unexpected :(. Try starting a new chat, or remove any configured MCP servers.",
+    ];
+
+    try {
+      poolAny.acquireNextAccount = async () => {
+        events.push("start");
+        return { account, leaseId: `lease-${events.length}` };
+      };
+      poolAny.trackRequestEnd = () => events.push("end");
+      poolAny.releaseSession = () => events.push("release");
+      poolAny.markError = async () => events.push("error");
+      providerAny.chatCompletion = async () => {
+        const error = errors[attempts.length]!;
+        attempts.push(error);
+        return {
+          success: false,
+          requestRejected: true,
+          httpStatus: 422,
+          error,
+        };
+      };
+
+      for (const error of errors) {
+        const routed = await routeRequest({
+          model: "auto",
+          messages: [{ role: "user", content: "continue" }],
+          stream: false,
+          _sessionId: "codex:request-rejected",
+        }, false);
+        expect(routed.result.error).toBe(error);
+      }
+
+      expect(attempts).toEqual(errors);
+      expect(events).toEqual(["start", "end", "start", "end"]);
+      expect(events).not.toContain("release");
+      expect(events).not.toContain("error");
+    } finally {
+      Object.assign(poolAny, {
+        acquireNextAccount: originals.acquireNextAccount,
+        trackRequestEnd: originals.trackRequestEnd,
+        releaseSession: originals.releaseSession,
         markError: originals.markError,
       });
       providerAny.chatCompletion = originals.chatCompletion;
@@ -984,7 +1045,7 @@ describe("request load tracking", () => {
     }
   });
 
-  test("does not blindly replay an ambiguous ECONNRESET from the chat POST", async () => {
+  test("does not replay or poison an account after an ambiguous ECONNRESET", async () => {
     const events: string[] = [];
     const poolAny = pool as any;
     const providerAny = provider as any;
@@ -1011,7 +1072,7 @@ describe("request load tracking", () => {
       const routed = await routeRequest({ ...request, stream: false }, false);
       expect(routed.result.success).toBe(false);
       expect(providerCalls).toBe(1);
-      expect(events).toEqual(["start", "end", "transient"]);
+      expect(events).toEqual(["start", "end"]);
     } finally {
       Object.assign(poolAny, {
         acquireNextAccount: originals.acquireNextAccount,

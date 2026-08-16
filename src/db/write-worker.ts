@@ -8,6 +8,8 @@ type WriteOperation =
       type: "commit_session";
       sessionId: string;
       accountId: number;
+      conversationId: string | null;
+      conversationUpdatedAt: number | null;
       messages: string;
       turnCount: number;
       estimatedTokens: number;
@@ -33,6 +35,12 @@ type WriteOperation =
         errorMessage: string | null;
         createdAt: number;
       };
+    }
+  | {
+      type: "clear_session_conversation";
+      sessionId: string;
+      accountId: number;
+      timestamp: number;
     }
   | { type: "mark_account_used"; accountId: number; timestamp: number }
   | { type: "update_account_tokens"; accountId: number; tokens: string; timestamp: number };
@@ -68,11 +76,14 @@ function execute(request: WriteRequest): void {
     case "commit_session":
       db.query(`
         INSERT INTO session_states (
-          session_id, account_id, messages, turn_count, estimated_tokens, message_chars,
+          session_id, account_id, conversation_id, conversation_updated_at,
+          messages, turn_count, estimated_tokens, message_chars,
           revision, created_at, updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?7)
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?9)
         ON CONFLICT(session_id) DO UPDATE SET
           account_id = excluded.account_id,
+          conversation_id = excluded.conversation_id,
+          conversation_updated_at = excluded.conversation_updated_at,
           messages = excluded.messages,
           turn_count = excluded.turn_count,
           estimated_tokens = excluded.estimated_tokens,
@@ -82,6 +93,8 @@ function execute(request: WriteRequest): void {
       `).run(
         operation.sessionId,
         operation.accountId,
+        operation.conversationId,
+        operation.conversationUpdatedAt,
         operation.messages,
         operation.turnCount,
         operation.estimatedTokens,
@@ -119,6 +132,15 @@ function execute(request: WriteRequest): void {
       );
       return;
     }
+    case "clear_session_conversation":
+      db.query(`
+        UPDATE session_states
+        SET conversation_id = NULL,
+            conversation_updated_at = NULL,
+            updated_at = ?1
+        WHERE session_id = ?2 AND account_id = ?3
+      `).run(operation.timestamp, operation.sessionId, operation.accountId);
+      return;
     case "mark_account_used":
       db.query("UPDATE accounts SET last_used_at = ?1, updated_at = ?1 WHERE id = ?2")
         .run(operation.timestamp, operation.accountId);

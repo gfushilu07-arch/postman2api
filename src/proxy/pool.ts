@@ -6,6 +6,7 @@ import { broadcast } from "../ws/index";
 import {
   clearAccountConversations,
   deleteConversationId,
+  restoreConversationId,
 } from "../provider/conversation-store";
 import { writeAccountTokens, writeAccountUsed } from "../db/write-queue";
 import { config } from "../config";
@@ -108,6 +109,8 @@ class AccountPool {
     if (!binding && sessionKey) {
       const [persisted] = await db.select({
         accountId: sessionStates.accountId,
+        conversationId: sessionStates.conversationId,
+        conversationUpdatedAt: sessionStates.conversationUpdatedAt,
         updatedAt: sessionStates.updatedAt,
       })
         .from(sessionStates)
@@ -119,6 +122,12 @@ class AccountPool {
         && allActive.some((account) => account.id === persisted.accountId)
       ) {
         this.bindSession(sessionKey, persisted.accountId, persisted.updatedAt.getTime());
+        restoreConversationId(
+          persisted.accountId,
+          sessionKey,
+          persisted.conversationId,
+          persisted.conversationUpdatedAt,
+        );
         binding = this.getSessionBinding(sessionKey);
       }
     }

@@ -22,6 +22,14 @@ function positiveInteger(value: string | undefined, fallback: number): number {
   return Math.max(1, Math.floor(positiveNumber(value, fallback)));
 }
 
+function nonNegativeInteger(value: string | undefined, fallback: number): number {
+  if (value === undefined || value.trim() === "") return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0
+    ? Math.floor(parsed)
+    : fallback;
+}
+
 const streamReadTimeoutMs = positiveNumber(process.env.STREAM_READ_TIMEOUT_MS, 300_000);
 const providerRequestTimeoutMs = positiveNumber(process.env.PROVIDER_REQUEST_TIMEOUT_MS, 480_000);
 const ttfbTimeoutMs = positiveNumber(process.env.TTFB_TIMEOUT_MS, 480_000);
@@ -78,6 +86,8 @@ export const config = {
     10 * 60 * 1000,
   ),
   sessionRetentionDays: positiveInteger(process.env.SESSION_RETENTION_DAYS, 30),
+  // Estimated input-token budget. 0 disables local context trimming.
+  contextMaxTokens: nonNegativeInteger(process.env.CONTEXT_MAX_TOKENS, 500_000),
   loginBrowserBackend: parseLoginBrowserBackend(process.env.LOGIN_BROWSER_BACKEND),
   // Bun.serve expects seconds and supports at most 255. Prefer the longer
   // provider/stream timeout, capped to Bun's supported range.
