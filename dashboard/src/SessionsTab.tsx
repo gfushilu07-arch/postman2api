@@ -111,14 +111,20 @@ export default function SessionsTab({
     void load();
     const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(`${wsProtocol}//${location.host}/ws`);
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+    const scheduleLoad = () => {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(() => void load(true), 400);
+    };
     ws.onmessage = (event) => {
       const message = JSON.parse(event.data);
-      if (message.type === "session_updated" || message.type === "account_status") void load(true);
+      if (message.type === "session_updated" || message.type === "account_status") scheduleLoad();
     };
     const poll = setInterval(() => {
-      if (!document.hidden) void load(true);
-    }, 5000);
+      if (!document.hidden && ws.readyState !== WebSocket.OPEN) void load(true);
+    }, 30000);
     return () => {
+      if (refreshTimer) clearTimeout(refreshTimer);
       ws.close();
       clearInterval(poll);
     };
@@ -226,7 +232,7 @@ export default function SessionsTab({
           <div className="page-sub">查看会话与账号的粘性绑定，处理异常绑定和本地上下文</div>
         </div>
         <div className="page-actions">
-          <span className="live-dot">每 5 秒自动刷新</span>
+          <span className="live-dot">WebSocket 实时刷新</span>
           <button className="page-action-btn" onClick={() => void load()} disabled={loading}>
             <svg width="14" height="14" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" fill="none"><path d="M20 11a8 8 0 0 0-14.6-4.6"/><path d="M4 4v5h5"/><path d="M4 13a8 8 0 0 0 14.6 4.6"/><path d="M20 20v-5h-5"/></svg>
             刷新
@@ -314,6 +320,8 @@ export default function SessionsTab({
                 <div><dt>账号状态</dt><dd>{accountStatus(detail).label}</dd></div>
                 <div><dt>会话状态</dt><dd>{sessionStateLabel(detail)}</dd></div>
                 <div><dt>对话轮次</dt><dd>{detail.turnCount}</dd></div>
+                <div><dt>估算上下文</dt><dd>{detail.estimatedTokens.toLocaleString()} tokens</dd></div>
+                <div><dt>消息大小</dt><dd>{detail.messageChars.toLocaleString()} 字符</dd></div>
                 <div><dt>修订版本</dt><dd>{detail.revision}</dd></div>
                 <div><dt>创建时间</dt><dd>{formatDate(detail.createdAt)}</dd></div>
                 <div><dt>最近活动</dt><dd>{formatDate(detail.updatedAt)}</dd></div>

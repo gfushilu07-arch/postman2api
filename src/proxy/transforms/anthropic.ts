@@ -73,7 +73,10 @@ export function anthropicToolsToOpenAI(tools: any[] | undefined): any[] | undefi
       if (seen.has(name)) return null;
       seen.add(name);
       const parameters =
-        tool.input_schema ?? tool.parameters ?? { type: "object", properties: {} };
+        tool.input_schema
+        ?? tool.inputSchema
+        ?? tool.parameters
+        ?? { type: "object", properties: {} };
       return {
         type: "function",
         function: {

@@ -115,6 +115,8 @@ export interface SessionBinding {
   accountEnabled: boolean | null;
   revision: number;
   turnCount: number;
+  estimatedTokens: number;
+  messageChars: number;
   createdAt: string;
   updatedAt: string;
   isInFlight: boolean;

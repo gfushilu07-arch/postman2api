@@ -10,17 +10,6 @@ const MAX_SESSION_ID_LENGTH = 320;
 
 export const sessionsRouter = new Hono();
 
-function turnCount(messages: string): number {
-  try {
-    const parsed = JSON.parse(messages) as Array<{ role?: unknown }>;
-    return Array.isArray(parsed)
-      ? parsed.filter((message) => message?.role === "user").length
-      : 0;
-  } catch {
-    return 0;
-  }
-}
-
 function normalizeSessionIds(value: unknown): string[] | null {
   if (!Array.isArray(value) || value.length === 0 || value.length > MAX_MANAGED_SESSIONS) {
     return null;
@@ -39,7 +28,9 @@ export async function listSessionBindings() {
   const rows = await db.select({
     sessionId: sessionStates.sessionId,
     accountId: sessionStates.accountId,
-    messages: sessionStates.messages,
+    turnCount: sessionStates.turnCount,
+    estimatedTokens: sessionStates.estimatedTokens,
+    messageChars: sessionStates.messageChars,
     revision: sessionStates.revision,
     createdAt: sessionStates.createdAt,
     updatedAt: sessionStates.updatedAt,
@@ -62,7 +53,9 @@ export async function listSessionBindings() {
       accountStatus: row.accountStatus,
       accountEnabled: row.accountEnabled,
       revision: row.revision,
-      turnCount: turnCount(row.messages),
+      turnCount: row.turnCount,
+      estimatedTokens: row.estimatedTokens,
+      messageChars: row.messageChars,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
       isInFlight: pool.isSessionInFlight(row.sessionId),

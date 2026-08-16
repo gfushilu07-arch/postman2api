@@ -7,6 +7,8 @@ import {
   clearAccountConversations,
   deleteConversationId,
 } from "../provider/conversation-store";
+import { writeAccountTokens, writeAccountUsed } from "../db/write-queue";
+import { config } from "../config";
 
 interface PoolState {
   lastIndex: number;
@@ -32,6 +34,11 @@ export interface AccountLease {
   leaseId: string;
 }
 
+interface AccountSelection {
+  lease?: AccountLease;
+  capacityLimited: boolean;
+}
+
 class AccountPool {
   private state: PoolState = { lastIndex: -1 };
   private inFlightByAccountId = new Map<number, Map<string, InFlightLease>>();
@@ -39,6 +46,7 @@ class AccountPool {
   private unavailableAccountIds = new Set<number>();
   private cooldownByAccountId = new Map<number, AccountCooldown>();
   private cooldownTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  private capacityWaiters = new Set<() => void>();
   private static readonly IN_FLIGHT_STALE_MS = 10 * 60 * 1000;
   private static readonly SESSION_BINDING_TTL_MS = 6 * 60 * 60 * 1000;
   private static readonly MAX_SESSION_BINDINGS = 10_000;
@@ -65,27 +73,43 @@ class AccountPool {
     excludedAccountIds: ReadonlySet<number> = new Set(),
   ): Promise<Account | null> {
     const selected = await this.selectNextAccount(sessionId, excludedAccountIds, false);
-    return selected?.account || null;
+    return selected.lease?.account || null;
   }
 
   async acquireNextAccount(
     sessionId?: string,
     excludedAccountIds: ReadonlySet<number> = new Set(),
   ): Promise<AccountLease | null> {
-    return this.selectNextAccount(sessionId, excludedAccountIds, true);
+    const deadline = Date.now() + config.accountCapacityWaitMs;
+    while (true) {
+      const selected = await this.selectNextAccount(sessionId, excludedAccountIds, true);
+      if (selected.lease) return selected.lease;
+      if (!selected.capacityLimited) return null;
+
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        throw new Error(
+          `All active accounts reached the concurrency limit (${config.accountMaxConcurrency})`,
+        );
+      }
+      await this.waitForCapacity(remainingMs);
+    }
   }
 
   private async selectNextAccount(
     sessionId: string | undefined,
     excludedAccountIds: ReadonlySet<number>,
     reserve: boolean,
-  ): Promise<AccountLease | null> {
+  ): Promise<AccountSelection> {
     const allActive = (await this.getActiveAccounts())
       .filter((account) => this.isAccountSelectable(account.id));
     const sessionKey = this.normalizeSessionId(sessionId);
     let binding = sessionKey ? this.getSessionBinding(sessionKey) : undefined;
     if (!binding && sessionKey) {
-      const [persisted] = await db.select({ accountId: sessionStates.accountId })
+      const [persisted] = await db.select({
+        accountId: sessionStates.accountId,
+        updatedAt: sessionStates.updatedAt,
+      })
         .from(sessionStates)
         .where(eq(sessionStates.sessionId, sessionKey))
         .limit(1);
@@ -94,7 +118,7 @@ class AccountPool {
         && persisted?.accountId !== undefined
         && allActive.some((account) => account.id === persisted.accountId)
       ) {
-        this.bindSession(sessionKey, persisted.accountId);
+        this.bindSession(sessionKey, persisted.accountId, persisted.updatedAt.getTime());
         binding = this.getSessionBinding(sessionKey);
       }
     }
@@ -104,15 +128,42 @@ class AccountPool {
         (account) => account.id === binding.accountId && !excludedAccountIds.has(account.id),
       );
       if (preferred) {
-        return {
-          account: preferred,
-          leaseId: reserve ? this.trackRequestStart(preferred.id, sessionKey) : "",
-        };
+        const preferredLoad = this.getInFlightCount(preferred.id);
+        if (!reserve || preferredLoad < config.accountMaxConcurrency) {
+          return {
+            lease: {
+              account: preferred,
+              leaseId: reserve ? this.trackRequestStart(preferred.id, sessionKey) : "",
+            },
+            capacityLimited: false,
+          };
+        }
+
+        const idleLongEnough = Date.now() - binding.updatedAt >= config.sessionRebalanceIdleMs;
+        const idleAlternative = idleLongEnough
+          ? allActive.find((account) => (
+            account.id !== preferred.id
+            && !excludedAccountIds.has(account.id)
+            && this.getInFlightCount(account.id) < config.accountMaxConcurrency
+          ))
+          : undefined;
+        if (idleAlternative && sessionKey) {
+          this.releaseSession(sessionKey, preferred.id);
+          this.bindSession(sessionKey, idleAlternative.id);
+          return {
+            lease: {
+              account: idleAlternative,
+              leaseId: reserve ? this.trackRequestStart(idleAlternative.id, sessionKey) : "",
+            },
+            capacityLimited: false,
+          };
+        }
+        return { capacityLimited: true };
       }
       this.releaseSession(sessionKey, binding.accountId);
     }
 
-    if (allActive.length === 0) return null;
+    if (allActive.length === 0) return { capacityLimited: false };
 
     const startIdx = (this.state.lastIndex + 1) % allActive.length;
     let selected: Account | undefined;
@@ -124,6 +175,7 @@ class AccountPool {
       const candidate = allActive[idx];
       if (!candidate || excludedAccountIds.has(candidate.id)) continue;
       const load = this.getInFlightCount(candidate.id);
+      if (reserve && load >= config.accountMaxConcurrency) continue;
       if (!selected || load < selectedLoad) {
         selected = candidate;
         selectedIdx = idx;
@@ -132,12 +184,18 @@ class AccountPool {
       }
     }
 
-    if (!selected) return null;
+    if (!selected) {
+      const hasCandidate = allActive.some((account) => !excludedAccountIds.has(account.id));
+      return { capacityLimited: reserve && hasCandidate };
+    }
     this.state.lastIndex = selectedIdx;
     if (sessionKey) this.bindSession(sessionKey, selected.id);
     return {
-      account: selected,
-      leaseId: reserve ? this.trackRequestStart(selected.id, sessionKey) : "",
+      lease: {
+        account: selected,
+        leaseId: reserve ? this.trackRequestStart(selected.id, sessionKey) : "",
+      },
+      capacityLimited: false,
     };
   }
 
@@ -191,6 +249,7 @@ class AccountPool {
     this.inFlightByAccountId.clear();
     this.unavailableAccountIds.clear();
     this.cooldownByAccountId.clear();
+    this.notifyCapacityWaiters();
     for (const timer of this.cooldownTimers.values()) clearTimeout(timer);
     this.cooldownTimers.clear();
     this.state.lastIndex = -1;
@@ -211,11 +270,19 @@ class AccountPool {
       return undefined;
     }
     this.sessionBindings.delete(sessionId);
-    this.sessionBindings.set(sessionId, { accountId: binding.accountId, updatedAt: Date.now() });
+    this.sessionBindings.set(sessionId, binding);
     return binding;
   }
 
-  private bindSession(sessionId: string, accountId: number): void {
+  touchSession(sessionId: string | undefined, accountId: number): void {
+    const sessionKey = this.normalizeSessionId(sessionId);
+    if (!sessionKey) return;
+    const binding = this.sessionBindings.get(sessionKey);
+    if (binding && binding.accountId !== accountId) return;
+    this.bindSession(sessionKey, accountId);
+  }
+
+  private bindSession(sessionId: string, accountId: number, updatedAt = Date.now()): void {
     const previous = this.sessionBindings.get(sessionId);
     if (previous && previous.accountId !== accountId) {
       deleteConversationId(previous.accountId, sessionId);
@@ -232,7 +299,7 @@ class AccountPool {
       }
     }
     this.sessionBindings.delete(sessionId);
-    this.sessionBindings.set(sessionId, { accountId, updatedAt: Date.now() });
+    this.sessionBindings.set(sessionId, { accountId, updatedAt });
   }
 
   private getInFlightCount(accountId: number): number {
@@ -269,6 +336,26 @@ class AccountPool {
       if (oldestLeaseId) leases.delete(oldestLeaseId);
     }
     if (leases.size === 0) this.inFlightByAccountId.delete(accountId);
+    this.notifyCapacityWaiters();
+  }
+
+  private waitForCapacity(timeoutMs: number): Promise<void> {
+    return new Promise((resolve) => {
+      let finished = false;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        this.capacityWaiters.delete(finish);
+        resolve();
+      };
+      const timer = setTimeout(finish, timeoutMs);
+      this.capacityWaiters.add(finish);
+    });
+  }
+
+  private notifyCapacityWaiters(): void {
+    for (const waiter of [...this.capacityWaiters]) waiter();
   }
 
   markCooling(accountId: number, durationMs: number, reason: string): void {
@@ -300,6 +387,7 @@ class AccountPool {
     const timer = this.cooldownTimers.get(accountId);
     if (timer) clearTimeout(timer);
     this.cooldownTimers.delete(accountId);
+    this.notifyCapacityWaiters();
   }
 
   private isAccountSelectable(accountId: number): boolean {
@@ -315,7 +403,7 @@ class AccountPool {
   }
 
   async markUsed(accountId: number): Promise<void> {
-    await db.update(accounts).set({ lastUsedAt: new Date(), updatedAt: new Date() }).where(eq(accounts.id, accountId));
+    await writeAccountUsed(accountId);
   }
 
   async markExhausted(accountId: number): Promise<void> {
@@ -338,7 +426,7 @@ class AccountPool {
   }
 
   async updateTokens(accountId: number, tokens: unknown): Promise<void> {
-    await db.update(accounts).set({ tokens: JSON.stringify(tokens), updatedAt: new Date() }).where(eq(accounts.id, accountId));
+    await writeAccountTokens(accountId, tokens);
   }
 
   async setEnabled(accountId: number, enabled: boolean): Promise<Account | null> {

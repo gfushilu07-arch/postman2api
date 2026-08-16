@@ -1,10 +1,9 @@
-import { eq, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { db } from "../db/index";
 import { sessionStates } from "../db/schema";
 import type { ChatMessage } from "./base";
 import { broadcast } from "../ws/index";
-
-const MAX_SESSION_MESSAGES_CHARS = 800_000;
+import { writeSessionState } from "../db/write-queue";
 
 export interface PreparedSession {
   messages: ChatMessage[];
@@ -26,6 +25,22 @@ function messagesEqual(left: ChatMessage, right: ChatMessage): boolean {
 function isPrefix(prefix: ChatMessage[], messages: ChatMessage[]): boolean {
   return prefix.length <= messages.length
     && prefix.every((message, index) => messagesEqual(message, messages[index]!));
+}
+
+function serializedMessages(messages: ChatMessage[]): string {
+  return JSON.stringify(messages);
+}
+
+function estimateMessageTokens(message: ChatMessage): number {
+  return Math.max(1, Math.ceil(JSON.stringify(message).length / 4)) + 4;
+}
+
+export function estimateSessionTokens(messages: ChatMessage[]): number {
+  return messages.reduce((total, message) => total + estimateMessageTokens(message), 0);
+}
+
+export function sessionMessageChars(messages: ChatMessage[]): number {
+  return serializedMessages(messages).length;
 }
 
 export function mergeSessionMessages(
@@ -69,41 +84,41 @@ export function mergeSessionMessages(
   return incoming.length === 1 ? [...stored, ...incoming] : incoming;
 }
 
-function trimMessages(messages: ChatMessage[]): ChatMessage[] {
-  if (JSON.stringify(messages).length <= MAX_SESSION_MESSAGES_CHARS) return messages;
-
-  const leadingSystem = messages.filter((message) => message.role === "system");
-  const kept: ChatMessage[] = [];
-  let size = JSON.stringify(leadingSystem).length;
-  for (let index = messages.length - 1; index >= 0; index--) {
-    const message = messages[index]!;
-    if (message.role === "system") continue;
-    const messageSize = messageKey(message).length;
-    if (kept.length > 0 && size + messageSize > MAX_SESSION_MESSAGES_CHARS) break;
-    kept.unshift(message);
-    size += messageSize;
-  }
-  return [...leadingSystem, ...kept];
+export function countUserTurns(messages: ChatMessage[]): number {
+  return messages.reduce((count, message) => count + (message.role === "user" ? 1 : 0), 0);
 }
 
 export async function prepareSession(
   sessionId: string | undefined,
   incomingMessages: ChatMessage[],
 ): Promise<PreparedSession> {
-  if (!sessionId) return { messages: cloneMessages(incomingMessages), revision: 0 };
+  if (!sessionId) {
+    return {
+      messages: cloneMessages(incomingMessages),
+      revision: 0,
+    };
+  }
 
   const [row] = await db.select().from(sessionStates)
     .where(eq(sessionStates.sessionId, sessionId)).limit(1);
-  if (!row) return { messages: cloneMessages(incomingMessages), revision: 0 };
+  if (!row) {
+    return {
+      messages: cloneMessages(incomingMessages),
+      revision: 0,
+    };
+  }
 
   try {
     const stored = JSON.parse(row.messages) as ChatMessage[];
     return {
-      messages: trimMessages(mergeSessionMessages(stored, incomingMessages)),
+      messages: mergeSessionMessages(stored, incomingMessages),
       revision: row.revision,
     };
   } catch {
-    return { messages: cloneMessages(incomingMessages), revision: row.revision };
+    return {
+      messages: cloneMessages(incomingMessages),
+      revision: row.revision,
+    };
   }
 }
 
@@ -114,27 +129,22 @@ export async function commitSession(
   accountId: number,
 ): Promise<void> {
   if (!sessionId) return;
-  const now = new Date();
-  const messages = JSON.stringify(trimMessages([
+  const sessionMessages = [
     ...cloneMessages(requestMessages),
     ...cloneMessages([assistantMessage]),
-  ]));
+  ];
+  const messages = serializedMessages(sessionMessages);
+  const turnCount = countUserTurns(sessionMessages);
+  const estimatedTokens = estimateSessionTokens(sessionMessages);
+  const messageChars = messages.length;
 
-  await db.insert(sessionStates).values({
+  await writeSessionState({
     sessionId,
     accountId,
     messages,
-    revision: 1,
-    createdAt: now,
-    updatedAt: now,
-  }).onConflictDoUpdate({
-    target: sessionStates.sessionId,
-    set: {
-      accountId,
-      messages,
-      revision: sql`${sessionStates.revision} + 1`,
-      updatedAt: now,
-    },
+    turnCount,
+    estimatedTokens,
+    messageChars,
   });
   broadcast({ type: "session_updated", data: { sessionId, accountId } });
 }

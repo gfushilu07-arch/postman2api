@@ -23,6 +23,10 @@ button{cursor:pointer}
 .admin-nav-link.active{color:var(--fg);font-weight:600;background:#efe8dc}
 .admin-header-right{display:flex;align-items:center;gap:8px}
 .admin-header-version{display:inline-flex;align-items:center;height:28px;padding:0 10px;border-radius:999px;background:#f1ece2;color:#6a6459;font-size:11px;font-weight:600;letter-spacing:.02em}
+.admin-header-github{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border:1px solid #e4ded3;border-radius:999px;background:#fff;color:#555;font-size:11px;font-weight:600;white-space:nowrap;transition:color .15s,border-color .15s,background .15s}
+.admin-header-github svg{width:14px;height:14px;fill:currentColor;flex:0 0 auto}
+.admin-header-github:hover{color:#111;border-color:#cbc3b7;background:#faf8f4}
+.admin-header-github:focus-visible{outline:2px solid #857761;outline-offset:2px}
 .admin-main{max-width:1280px;margin:0 auto;padding:78px 28px 32px}
 
 .page-hd{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:22px;gap:12px;flex-wrap:wrap}

@@ -31,6 +31,9 @@ const quotaSafeStreamBufferBytes = positiveNumber(
 );
 const streamKeepaliveIntervalMs = positiveNumber(process.env.STREAM_KEEPALIVE_INTERVAL_MS, 10_000);
 const postmanFetchVerbose = /^(1|true|yes)$/i.test(process.env.POSTMAN_FETCH_VERBOSE || "");
+const accountMaxConcurrency = positiveInteger(process.env.ACCOUNT_MAX_CONCURRENCY, 2);
+const accountCapacityWaitMs = positiveInteger(process.env.ACCOUNT_CAPACITY_WAIT_MS, 60_000);
+const sessionRebalanceIdleMs = positiveInteger(process.env.SESSION_REBALANCE_IDLE_MS, 10 * 60 * 1000);
 const requestLogRetainCount = positiveInteger(process.env.REQUEST_LOG_RETAIN_COUNT, 50);
 const requestLogCleanupThreshold = Math.max(
   requestLogRetainCount + 1,
@@ -65,6 +68,9 @@ export const config = {
   quotaSafeStreamBufferBytes,
   streamKeepaliveIntervalMs,
   postmanFetchVerbose,
+  accountMaxConcurrency,
+  accountCapacityWaitMs,
+  sessionRebalanceIdleMs,
   requestLogRetainCount,
   requestLogCleanupThreshold,
   requestLogCleanupIntervalMs: positiveInteger(

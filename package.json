@@ -1,6 +1,6 @@
 {
   "name": "postman2api",
-  "version": "1.0.3",
+  "version": "1.0.10",
   "type": "module",
   "scripts": {
     "start": "NODE_ENV=development bun src/index.ts",
@@ -12,7 +12,7 @@
     "migrate:dev": "NODE_ENV=development bun src/db/migrate.ts",
     "build": "bun scripts/build-release.ts",
     "build:dashboard": "cd dashboard && bun run build",
-    "build:server": "NODE_ENV=production bun build src/index.ts src/db/migrate.ts --outdir dist --target bun --packages external",
+    "build:server": "NODE_ENV=production bun build src/index.ts src/db/migrate.ts src/db/write-worker.ts --outdir dist --target bun --packages external",
     "docker:prepare": "bun scripts/prepare-docker-context.ts",
     "docker:build": "bun run build && bun run docker:prepare && docker build --target runtime -t postman2api:local .",
     "docker:deploy": "bash scripts/deploy-docker.sh",

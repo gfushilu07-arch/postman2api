@@ -14,6 +14,7 @@ import { eq } from "drizzle-orm";
 import { isDefaultEncryptionKey } from "./utils/crypto";
 import { acceptsApiKey } from "./auth/api-key";
 import { startRetentionScheduler, stopRetentionScheduler } from "./db/retention";
+import { closeDatabaseWriteQueue } from "./db/write-queue";
 import { APP_VERSION } from "./version";
 
 const app = new Hono();
@@ -108,10 +109,20 @@ console.log(`[postman2api] Anthropic: http://localhost:${config.port}/v1/message
 console.log(`[postman2api] Dashboard: http://localhost:${config.port}/`);
 console.log(`[postman2api] WebSocket: ws://localhost:${config.port}/ws`);
 
-process.on("SIGTERM", () => {
+let shuttingDown = false;
+
+async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[postman2api] Received ${signal}, shutting down...`);
   stopWarmupScheduler();
   stopRetentionScheduler();
   server.stop();
-});
+  await closeDatabaseWriteQueue();
+  process.exit(0);
+}
+
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));
 
 export { app, server };

@@ -34,6 +34,7 @@ function createDatabase(): Database {
       session_id TEXT PRIMARY KEY,
       account_id INTEGER,
       messages TEXT NOT NULL,
+      turn_count INTEGER NOT NULL DEFAULT 0,
       revision INTEGER NOT NULL DEFAULT 1,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL

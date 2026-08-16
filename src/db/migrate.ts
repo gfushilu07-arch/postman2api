@@ -85,10 +85,50 @@ async function migrate() {
     session_id TEXT PRIMARY KEY,
     account_id INTEGER,
     messages TEXT NOT NULL,
+    turn_count INTEGER NOT NULL DEFAULT 0,
+    estimated_tokens INTEGER NOT NULL DEFAULT 0,
+    message_chars INTEGER NOT NULL DEFAULT 0,
     revision INTEGER NOT NULL DEFAULT 1,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
   )`);
+
+  const sessionStateColumns = (await db.all(
+    sql`PRAGMA table_info(session_states)`,
+  )) as Array<{ name: string }>;
+  if (!sessionStateColumns.some((column) => column.name === "turn_count")) {
+    await db.run(sql`ALTER TABLE session_states ADD COLUMN turn_count INTEGER NOT NULL DEFAULT 0`);
+    await db.run(sql.raw(`
+      UPDATE session_states
+      SET turn_count = (
+        SELECT COUNT(*)
+        FROM json_each(CASE
+          WHEN json_valid(session_states.messages) THEN session_states.messages
+          ELSE '[]'
+        END)
+        WHERE json_extract(json_each.value, '$.role') = 'user'
+      )
+    `));
+  }
+  const refreshedSessionStateColumns = (await db.all(
+    sql`PRAGMA table_info(session_states)`,
+  )) as Array<{ name: string }>;
+  if (!refreshedSessionStateColumns.some((column) => column.name === "estimated_tokens")) {
+    await db.run(sql`ALTER TABLE session_states ADD COLUMN estimated_tokens INTEGER NOT NULL DEFAULT 0`);
+    await db.run(sql.raw(`
+      UPDATE session_states
+      SET estimated_tokens = CAST((length(messages) + 3) / 4 AS INTEGER)
+      WHERE estimated_tokens = 0 AND messages IS NOT NULL
+    `));
+  }
+  if (!refreshedSessionStateColumns.some((column) => column.name === "message_chars")) {
+    await db.run(sql`ALTER TABLE session_states ADD COLUMN message_chars INTEGER NOT NULL DEFAULT 0`);
+    await db.run(sql.raw(`
+      UPDATE session_states
+      SET message_chars = length(messages)
+      WHERE message_chars = 0 AND messages IS NOT NULL
+    `));
+  }
 
   await db.run(sql`CREATE INDEX IF NOT EXISTS request_logs_created_at_idx ON request_logs(created_at)`);
   await db.run(sql`CREATE INDEX IF NOT EXISTS request_logs_status_created_at_idx ON request_logs(status, created_at)`);

@@ -2,6 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { eq } from "drizzle-orm";
 import { db } from "../src/db/index";
 import { accounts, requestLogs, sessionStates } from "../src/db/schema";
+import { flushDatabaseWriteQueue } from "../src/db/write-queue";
+import { config } from "../src/config";
 import { handleChatCompletion } from "../src/proxy/index";
 import { pool } from "../src/proxy/pool";
 import { provider } from "../src/proxy/router";
@@ -9,7 +11,9 @@ import { acquireSessionLock, clearSessionLocks } from "../src/proxy/session-lock
 import {
   commitSession,
   deleteSessionState,
+  estimateSessionTokens,
   getSessionMessages,
+  mergeSessionMessages,
   prepareSession,
 } from "../src/provider/session-state";
 
@@ -42,6 +46,7 @@ async function createAccount(label: string) {
 afterEach(async () => {
   clearSessionLocks();
   pool.clearRuntimeState();
+  await flushDatabaseWriteQueue();
   for (const id of sessions) await deleteSessionState(id);
   sessions.clear();
   for (const id of accountIds) {
@@ -142,6 +147,8 @@ describe("persistent session state", () => {
       const [state] = await db.select().from(sessionStates)
         .where(eq(sessionStates.sessionId, id)).limit(1);
       expect(state?.accountId).toBe(attempts[1]!.accountId);
+      expect(state?.estimatedTokens).toBeGreaterThan(0);
+      expect(state?.messageChars).toBeGreaterThan(0);
     } finally {
       poolAny.getActiveAccounts = originals.getActiveAccounts;
       poolAny.markExhausted = originals.markExhausted;
@@ -339,6 +346,21 @@ describe("session execution order", () => {
   });
 });
 
+describe("session context preservation", () => {
+  test("preserves the complete merged history instead of applying a local context budget", () => {
+    const messages = [
+      { role: "system", content: "Always keep this instruction." },
+      { role: "user", content: "old question ".repeat(20) },
+      { role: "assistant", content: "old answer ".repeat(20) },
+      { role: "user", content: "latest question" },
+    ] as any;
+    const merged = mergeSessionMessages(messages.slice(0, -1), messages.slice(-1));
+
+    expect(merged).toEqual(messages);
+    expect(estimateSessionTokens(merged)).toBeGreaterThan(0);
+  });
+});
+
 describe("account leasing", () => {
   test("balances concurrent sessions and releases only the matching lease", async () => {
     const first = await createAccount("lease-first");
@@ -392,6 +414,73 @@ describe("account leasing", () => {
       expect(poolAny.getInFlightCount(999_001)).toBe(0);
     } finally {
       Date.now = realNow;
+    }
+  });
+
+  test("waits for account capacity and resumes when a lease is released", async () => {
+    const account = await createAccount("capacity-wait");
+    const poolAny = pool as any;
+    const originalGetActiveAccounts = poolAny.getActiveAccounts;
+    const activeLeases: Array<{ account: typeof account; leaseId: string }> = [];
+
+    try {
+      pool.clearRuntimeState();
+      poolAny.getActiveAccounts = async () => [account];
+      for (let index = 0; index < config.accountMaxConcurrency; index++) {
+        activeLeases.push((await pool.acquireNextAccount(`capacity-active-${index}`))!);
+      }
+
+      let resolved = false;
+      const waiting = pool.acquireNextAccount("capacity-waiting").then((lease) => {
+        resolved = true;
+        return lease;
+      });
+      await Bun.sleep(20);
+      expect(resolved).toBe(false);
+
+      const released = activeLeases.shift()!;
+      pool.trackRequestEnd(released.account.id, released.leaseId);
+      const resumed = await waiting;
+      expect(resumed?.account.id).toBe(account.id);
+
+      if (resumed) pool.trackRequestEnd(resumed.account.id, resumed.leaseId);
+      for (const lease of activeLeases) pool.trackRequestEnd(lease.account.id, lease.leaseId);
+    } finally {
+      poolAny.getActiveAccounts = originalGetActiveAccounts;
+    }
+  });
+
+  test("rebalances an idle bound session when its account is full", async () => {
+    const first = await createAccount("rebalance-first");
+    const second = await createAccount("rebalance-second");
+    const poolAny = pool as any;
+    const originalGetActiveAccounts = poolAny.getActiveAccounts;
+    const session = "idle-rebalance-session";
+    const fillerLeases: string[] = [];
+
+    try {
+      pool.clearRuntimeState();
+      poolAny.getActiveAccounts = async () => [first, second];
+
+      const initial = await pool.acquireNextAccount(session);
+      expect(initial?.account.id).toBe(first.id);
+      pool.trackRequestEnd(initial!.account.id, initial!.leaseId);
+      poolAny.sessionBindings.get(session).updatedAt = Date.now()
+        - config.sessionRebalanceIdleMs
+        - 1;
+
+      for (let index = 0; index < config.accountMaxConcurrency; index++) {
+        fillerLeases.push(pool.trackRequestStart(first.id, `rebalance-filler-${index}`));
+      }
+
+      const rebalanced = await pool.acquireNextAccount(session);
+      expect(rebalanced?.account.id).toBe(second.id);
+      expect(poolAny.sessionBindings.get(session).accountId).toBe(second.id);
+
+      if (rebalanced) pool.trackRequestEnd(rebalanced.account.id, rebalanced.leaseId);
+      for (const leaseId of fillerLeases) pool.trackRequestEnd(first.id, leaseId);
+    } finally {
+      poolAny.getActiveAccounts = originalGetActiveAccounts;
     }
   });
 

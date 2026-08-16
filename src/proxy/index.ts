@@ -1,15 +1,17 @@
-import { db } from "../db/index";
-import { requestLogs } from "../db/schema";
 import type { NewRequestLog } from "../db/schema";
 import type { ChatCompletionRequest, ChatMessage } from "../provider/base";
 import { routeRequest, type RouteResult } from "./router";
 import { pool } from "./pool";
 import { broadcast } from "../ws/index";
-import { commitSession, prepareSession } from "../provider/session-state";
+import {
+  commitSession,
+  prepareSession,
+} from "../provider/session-state";
 import { deleteConversationId } from "../provider/conversation-store";
 import { acquireSessionLock } from "./session-lock";
 import { config } from "../config";
 import { normalizeReasoningEffort } from "../provider/base";
+import { writeRequestLog } from "../db/write-queue";
 
 interface ByteStreamReader {
   read(): Promise<{ done: boolean; value?: Uint8Array }>;
@@ -17,7 +19,7 @@ interface ByteStreamReader {
   releaseLock(): void;
 }
 
-const MAX_REQUEST_SNAPSHOT_CHARS = 240_000;
+const MAX_REQUEST_SNAPSHOT_CHARS = 96_000;
 
 export async function handleChatCompletion(
   body: ChatCompletionRequest,
@@ -65,7 +67,13 @@ export async function handleChatCompletion(
     if (result.success && result.response) {
       const assistantMessage = result.response.choices[0]?.message;
       if (assistantMessage) {
-        await commitSession(body._sessionId, body.messages, assistantMessage, account.id);
+        await commitSession(
+          body._sessionId,
+          body.messages,
+          assistantMessage,
+          account.id,
+        );
+        pool.touchSession(body._sessionId, account.id);
       }
       await recordRequest({
         ...requestLogContext(body),
@@ -111,6 +119,7 @@ export async function handleChatCompletion(
     if (
       errMsg.includes("No active accounts")
       || errMsg.includes("All accounts failed")
+      || errMsg.includes("reached the concurrency limit")
       || errMsg.startsWith("Invalid model:")
     ) {
       const status = errMsg.startsWith("Invalid model:") ? 400 : 503;
@@ -238,6 +247,7 @@ function wrapQuotaSafeStream(
                 assistantMessage,
                 attempt.account.id,
               );
+              pool.touchSession(ctx.sessionId, attempt.account.id);
             }
             await recordRequest({
               ...requestLogContext(ctx.request),
@@ -323,10 +333,7 @@ function forwardAbort(source: AbortSignal | undefined, target: AbortController):
 
 async function recordRequest(entry: NewRequestLog): Promise<void> {
   try {
-    await db.insert(requestLogs).values({
-      ...entry,
-      createdAt: new Date(),
-    });
+    await writeRequestLog(entry);
     broadcast({ type: "request_completed", data: { status: entry.status, model: entry.model } });
   } catch (err) {
     console.error("[proxy] Failed to log request:", err);
@@ -340,8 +347,20 @@ function requestLogContext(request: ChatCompletionRequest): Pick<
   return {
     sessionId: request._sessionId,
     reasoningEffort: normalizeReasoningEffort(request),
-    requestMessages: serializeSnapshot(request.messages),
+    // Request details are for search/debugging only. Keep the latest user
+    // question instead of duplicating the full conversation in every row.
+    requestMessages: serializeSnapshot(latestUserQuestion(request.messages)),
   };
+}
+
+function latestUserQuestion(messages: ChatMessage[]): ChatMessage[] {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]!;
+    if (message.role === "user") {
+      return [{ role: "user", content: message.content }];
+    }
+  }
+  return [];
 }
 
 function serializeSnapshot(value: unknown): string {

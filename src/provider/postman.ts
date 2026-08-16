@@ -31,8 +31,6 @@ import { getConversationId, setConversationId } from "./conversation-store";
 
 const DEFAULT_APP_VERSION = "12.15.4-260616-1202";
 const CHAT_ENDPOINT = "/_gw/chat";
-const MAX_QUERY_LEN = 9_500;
-const MAX_CONTEXT_LEN = 800_000;
 
 const TRANSIENT_ERROR_PATTERNS = [
   "too much data",
@@ -101,8 +99,10 @@ export function normalizePostmanTools(tools?: unknown[]): NormalizedPostmanTool[
     const rawParameters =
       functionDefinition.parameters
       ?? functionDefinition.input_schema
+      ?? functionDefinition.inputSchema
       ?? tool.parameters
-      ?? tool.input_schema;
+      ?? tool.input_schema
+      ?? tool.inputSchema;
     const parameters = normalizeToolParameters(rawParameters);
     const description = firstNonEmptyString(
       functionDefinition.description,
@@ -203,12 +203,16 @@ export class PostmanProvider extends BaseProvider {
         if (msg.role === "tool") {
           const text = extractTextFromMessage(msg.content);
           const tcId = msg.tool_call_id || "";
-          toolResultParts.unshift(`[Tool Result id=${tcId}]\n${text}`);
+          const label = (msg as any).is_error || (msg as any).isError
+            ? "Tool Error"
+            : "Tool Result";
+          toolResultParts.unshift(`[${label} id=${tcId}]\n${text}`);
           continue;
         }
         if (isAnthropicToolResult(msg)) {
           const content = msg.content;
           if (Array.isArray(content)) {
+            const messageToolResults: string[] = [];
             for (const block of content) {
               if (block?.type === "tool_result") {
                 const toolId = block.tool_use_id || "";
@@ -217,9 +221,13 @@ export class PostmanProvider extends BaseProvider {
                   : Array.isArray(block.content)
                     ? block.content.filter((b: any) => b?.type === "text").map((b: any) => b.text).join("\n")
                     : "";
-                toolResultParts.unshift(`[Tool Result id=${toolId}]\n${resultContent}`);
+                const label = block.is_error || block.isError
+                  ? "Tool Error"
+                  : "Tool Result";
+                messageToolResults.push(`[${label} id=${toolId}]\n${resultContent}`);
               }
             }
+            toolResultParts.unshift(...messageToolResults);
           }
           continue;
         }
@@ -228,10 +236,7 @@ export class PostmanProvider extends BaseProvider {
       const resultsBlock = toolResultParts.join("\n\n");
 
       if (hasConversationId) {
-        const truncated = resultsBlock.length > MAX_QUERY_LEN
-          ? resultsBlock.slice(0, MAX_QUERY_LEN - 100)
-          : resultsBlock;
-        query = `${truncated}\n\nProcess these tool results and continue.`;
+        query = `${resultsBlock}\n\nProcess these tool results and continue.`;
       } else {
         query = "Continue the conversation.";
       }
@@ -239,8 +244,7 @@ export class PostmanProvider extends BaseProvider {
     } else {
       const idx = findLastIndex(messages, (m) => m.role === "user");
       queryMsgIdx = idx;
-      const raw = idx >= 0 ? extractTextFromMessage(messages[idx]!.content) : "";
-      query = raw.length > MAX_QUERY_LEN ? raw.slice(-MAX_QUERY_LEN) : raw;
+      query = idx >= 0 ? extractTextFromMessage(messages[idx]!.content) : "";
     }
 
     if (hasConversationId) {
@@ -344,7 +348,7 @@ export class PostmanProvider extends BaseProvider {
       availableSkills: [],
       devModeOptions: {
         selectedModel: postmanModel,
-        isParallelToolCallingSupported: true,
+        isParallelToolCallingSupported: request.parallel_tool_calls !== false,
         autoRun: hasTools && !isToolChoiceNone(request.tool_choice),
         supportsAskUser: false,
         supportsActionRecommendations: true,

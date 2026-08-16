@@ -30,6 +30,8 @@ const TAB_PATHS: Record<Tab, string> = {
   settings: "/settings",
 };
 
+const GITHUB_REPOSITORY_URL = "https://github.com/gfushilu07-arch/postman2api";
+
 function getTabFromPathname(pathname: string): Tab {
   const normalizedPath = pathname.replace(/\/+$/, "") || "/";
   const matchedTab = (Object.entries(TAB_PATHS) as [Tab, string][]).find(
@@ -167,6 +169,21 @@ function Header({ tab, navigateToTab }: { tab: Tab; navigateToTab: (tab: Tab) =>
           <span className="admin-header-version" title={`当前版本 ${__APP_VERSION__}`}>
             v{__APP_VERSION__}
           </span>
+          {tab === "accounts" && (
+            <a
+              className="admin-header-github"
+              href={GITHUB_REPOSITORY_URL}
+              target="_blank"
+              rel="noreferrer"
+              title="在 GitHub 查看 postman2api 开源代码"
+              aria-label="在 GitHub 查看 postman2api 开源代码（新窗口打开）"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 2a10 10 0 0 0-3.16 19.49c.5.09.68-.22.68-.48v-1.87c-2.78.61-3.37-1.18-3.37-1.18-.45-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.61.07-.61 1 .07 1.53 1.03 1.53 1.03.9 1.53 2.35 1.09 2.92.83.09-.65.35-1.09.64-1.34-2.22-.25-4.56-1.11-4.56-4.94 0-1.09.39-1.98 1.03-2.68-.1-.25-.45-1.27.1-2.64 0 0 .84-.27 2.75 1.02A9.58 9.58 0 0 1 12 6.82a9.6 9.6 0 0 1 2.5.34c1.91-1.29 2.75-1.02 2.75-1.02.55 1.37.2 2.39.1 2.64.64.7 1.03 1.59 1.03 2.68 0 3.84-2.34 4.68-4.57 4.93.36.31.68.92.68 1.86v2.76c0 .27.18.58.69.48A10 10 0 0 0 12 2Z" />
+              </svg>
+              <span>GitHub 开源地址</span>
+            </a>
+          )}
         </div>
       </div>
     </header>
@@ -326,6 +343,11 @@ function AccountsTab({
     load();
     const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(`${wsProtocol}//${location.host}/ws`);
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+    const scheduleLoad = () => {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(() => void load(true), 400);
+    };
     ws.onmessage = (ev) => {
       const data = JSON.parse(ev.data);
       if (data.type === "login_log") {
@@ -346,10 +368,8 @@ function AccountsTab({
             errorMessage,
           };
         }));
-      } else if (data.type === "login_start" || data.type === "account_added" || data.type === "account_updated" || data.type === "account_deleted") {
-        load(true);
-      } else {
-        load(true);
+      } else if (data.type === "account_added" || data.type === "account_updated" || data.type === "account_deleted") {
+        scheduleLoad();
       }
     };
     wsRef.current = ws;
@@ -358,6 +378,7 @@ function AccountsTab({
       if (!document.hidden && ws.readyState !== WebSocket.OPEN) load(true);
     }, 30000);
     return () => {
+      if (refreshTimer) clearTimeout(refreshTimer);
       ws.close();
       clearInterval(poll);
     };
@@ -1302,9 +1323,30 @@ function StatsTab() {
       }
     };
     void get(true);
-    const interval = setInterval(() => void get(false), 5000);
+    const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
+    const ws = new WebSocket(`${wsProtocol}//${location.host}/ws`);
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+    const scheduleGet = () => {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(() => void get(false), 400);
+    };
+    ws.onmessage = (event) => {
+      const message = JSON.parse(event.data);
+      if (
+        message.type === "request_completed"
+        || message.type === "account_status"
+        || message.type === "account_added"
+        || message.type === "account_updated"
+        || message.type === "account_deleted"
+      ) scheduleGet();
+    };
+    const interval = setInterval(() => {
+      if (!document.hidden && ws.readyState !== WebSocket.OPEN) void get(false);
+    }, 30000);
     return () => {
       active = false;
+      if (refreshTimer) clearTimeout(refreshTimer);
+      ws.close();
       clearInterval(interval);
     };
   }, [appliedRequestSearch]);
@@ -1445,7 +1487,7 @@ function StatsTab() {
             <input
               value={requestSearch}
               onChange={(event) => setRequestSearch(event.target.value)}
-              placeholder="搜索发送上下文、返回内容或错误信息"
+              placeholder="搜索最新用户提问、返回内容或错误信息"
               aria-label="搜索最近请求详情"
             />
             {requestSearch && (
@@ -1615,7 +1657,7 @@ function RequestDetailDrawer({
                   <code>{detail.sessionId}</code>
                 </div>
               )}
-              <RequestSnapshotSection title="发送上下文" value={detail.requestMessages} />
+              <RequestSnapshotSection title="最新用户提问" value={detail.requestMessages} />
               <RequestSnapshotSection title="返回内容" value={detail.responseMessage} />
               {detail.errorMessage && (
                 <div className="request-detail-section">

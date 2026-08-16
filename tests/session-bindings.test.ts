@@ -46,6 +46,7 @@ async function createSession(
       { role: "assistant", content: "answer" },
       { role: "user", content: "second" },
     ]),
+    turnCount: 2,
     revision: 3,
     createdAt: new Date(updatedAt.getTime() - 60_000),
     updatedAt,
