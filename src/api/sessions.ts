@@ -1,14 +1,17 @@
 import { Hono } from "hono";
 import { desc, eq, inArray } from "drizzle-orm";
 import { db } from "../db/index";
-import { accounts, sessionStates } from "../db/schema";
+import { accounts, requestLogs, sessionStates } from "../db/schema";
 import { pool } from "../proxy/pool";
+import { PostmanProvider } from "../provider/postman";
+import { broadcast } from "../ws/index";
 
 const ACTIVE_WINDOW_MS = 30 * 60 * 1000;
 const MAX_MANAGED_SESSIONS = 500;
 const MAX_SESSION_ID_LENGTH = 320;
 
 export const sessionsRouter = new Hono();
+const recoveryProvider = new PostmanProvider();
 
 function normalizeSessionIds(value: unknown): string[] | null {
   if (!Array.isArray(value) || value.length === 0 || value.length > MAX_MANAGED_SESSIONS) {
@@ -37,6 +40,8 @@ export async function listSessionBindings() {
     accountEmail: accounts.email,
     accountStatus: accounts.status,
     accountEnabled: accounts.enabled,
+    conversationId: sessionStates.conversationId,
+    conversationUpdatedAt: sessionStates.conversationUpdatedAt,
   }).from(sessionStates)
     .leftJoin(accounts, eq(sessionStates.accountId, accounts.id))
     .orderBy(desc(sessionStates.updatedAt));
@@ -59,6 +64,8 @@ export async function listSessionBindings() {
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
       isInFlight: pool.isSessionInFlight(row.sessionId),
+      hasConversation: Boolean(row.conversationId),
+      conversationUpdatedAt: row.conversationUpdatedAt,
       abnormal,
     };
   });
@@ -70,6 +77,9 @@ export async function listSessionBindings() {
       active30m: data.filter((item) => now - item.updatedAt.getTime() <= ACTIVE_WINDOW_MS).length,
       boundAccounts: new Set(data.flatMap((item) => item.accountId === null ? [] : [item.accountId])).size,
       abnormal: data.filter((item) => item.abnormal).length,
+      recoverable: data.filter((item) => (
+        item.accountId !== null && !item.hasConversation
+      )).length,
     },
   };
 }
@@ -121,6 +131,82 @@ sessionsRouter.post("/batch-release", async (c) => {
   }
   await releaseSessionBindings(sessionIds);
   return c.json({ success: true, count: sessionIds.length });
+});
+
+sessionsRouter.post("/recover", async (c) => {
+  const body = await c.req.json().catch(() => null) as { sessionId?: unknown } | null;
+  const sessionId = typeof body?.sessionId === "string" ? body.sessionId.trim() : "";
+  if (!sessionId || sessionId.length > MAX_SESSION_ID_LENGTH) {
+    return c.json({ error: "sessionId must be a valid session ID" }, 400);
+  }
+  if (pool.isSessionInFlight(sessionId)) {
+    return c.json({ error: "正在处理请求的会话不能执行恢复" }, 409);
+  }
+
+  const [session] = await db.select().from(sessionStates)
+    .where(eq(sessionStates.sessionId, sessionId)).limit(1);
+  if (!session) return c.json({ error: "会话不存在" }, 404);
+  if (session.accountId === null) {
+    return c.json({ error: "会话没有原始绑定账号，无法安全恢复 Postman 上游会话" }, 409);
+  }
+  if (session.conversationId) {
+    return c.json({
+      success: true,
+      recovered: false,
+      alreadyBound: true,
+      conversationId: session.conversationId,
+    });
+  }
+
+  const [account] = await db.select().from(accounts)
+    .where(eq(accounts.id, session.accountId)).limit(1);
+  if (!account) return c.json({ error: "原始绑定账号已被删除，无法恢复" }, 409);
+
+  const [latestRequest] = await db.select({
+    model: requestLogs.model,
+  }).from(requestLogs)
+    .where(eq(requestLogs.sessionId, sessionId))
+    .orderBy(desc(requestLogs.createdAt))
+    .limit(1);
+  if (!latestRequest?.model) {
+    return c.json({ error: "缺少该会话最近使用的模型记录，已停止恢复以避免绑定错误模型" }, 409);
+  }
+
+  let messages;
+  try {
+    messages = JSON.parse(session.messages);
+  } catch {
+    return c.json({ error: "本地会话历史损坏，无法安全匹配 Postman 云端会话" }, 409);
+  }
+
+  const result = await recoveryProvider.recoverConversation(account, {
+    model: latestRequest.model,
+    messages,
+    _sessionId: sessionId,
+  });
+  if (!result.recovered || !result.conversationId) {
+    const reason = {
+      no_local_anchor: "本地历史缺少可用于唯一匹配的 assistant/tool 指纹",
+      no_history: "原始账号没有可查询的 Postman 云端会话历史",
+      no_compatible_candidate: "未找到模型、状态和内容都匹配的 Postman 云端会话",
+      ambiguous: "找到多个相近候选，为避免串会话已停止自动绑定",
+      history_error: result.error || "Postman 云端历史查询失败",
+      recovered: "恢复失败",
+    }[result.reason];
+    return c.json({
+      error: `恢复失败：${reason}`,
+      recovery: result,
+    }, 409);
+  }
+
+  broadcast({ type: "session_updated", data: { sessionId, accountId: account.id } });
+  return c.json({
+    success: true,
+    recovered: true,
+    conversationId: result.conversationId,
+    score: result.score,
+    scanned: result.scanned,
+  });
 });
 
 sessionsRouter.post("/delete", async (c) => {

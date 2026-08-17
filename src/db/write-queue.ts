@@ -41,6 +41,13 @@ type WriteOperation =
       accountId: number;
       timestamp: number;
     }
+  | {
+      type: "restore_session_conversation";
+      sessionId: string;
+      accountId: number;
+      conversationId: string;
+      conversationUpdatedAt: number;
+    }
   | { type: "mark_account_used"; accountId: number; timestamp: number }
   | { type: "update_account_tokens"; accountId: number; tokens: string; timestamp: number };
 
@@ -106,6 +113,22 @@ export function clearPersistedSessionConversation(
     sessionId,
     accountId,
     timestamp: timestamp(),
+  });
+}
+
+export function restorePersistedSessionConversation(
+  sessionId: string | undefined,
+  accountId: number,
+  conversationId: string,
+  conversationUpdatedAt = timestamp(),
+): Promise<void> {
+  if (!sessionId || !conversationId) return Promise.resolve();
+  return enqueue({
+    type: "restore_session_conversation",
+    sessionId,
+    accountId,
+    conversationId,
+    conversationUpdatedAt,
   });
 }
 
@@ -226,6 +249,19 @@ function execute(operation: WriteOperation): void {
             updated_at = ?1
         WHERE session_id = ?2 AND account_id = ?3
       `).run(operation.timestamp, operation.sessionId, operation.accountId);
+      return;
+    case "restore_session_conversation":
+      client.query(`
+        UPDATE session_states
+        SET conversation_id = ?1,
+            conversation_updated_at = ?2
+        WHERE session_id = ?3 AND account_id = ?4
+      `).run(
+        operation.conversationId,
+        operation.conversationUpdatedAt,
+        operation.sessionId,
+        operation.accountId,
+      );
       return;
     case "mark_account_used":
       client.query("UPDATE accounts SET last_used_at = ?1, updated_at = ?1 WHERE id = ?2")

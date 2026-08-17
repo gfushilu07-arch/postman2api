@@ -152,6 +152,12 @@ export interface ProviderResult {
    * account-health signal and must never trigger account rotation/disablement.
    */
   requestRejected?: boolean;
+  /**
+   * A new Postman conversation would require a bootstrap payload larger than
+   * the configured safe transport budget. The local transcript is unchanged
+   * and the request was not sent upstream.
+   */
+  contextBootstrapTooLarge?: boolean;
   httpStatus?: number;
   tokens?: unknown;
 }

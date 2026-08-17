@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   deleteSessionBindings,
   fetchSessionBindings,
+  recoverSessionConversation,
   releaseSessionBindings,
   type SessionBinding,
   type SessionBindingSummary,
@@ -16,6 +17,7 @@ const EMPTY_SUMMARY: SessionBindingSummary = {
   active30m: 0,
   boundAccounts: 0,
   abnormal: 0,
+  recoverable: 0,
 };
 
 function sessionState(item: SessionBinding): Exclude<SessionFilter, "all"> {
@@ -85,6 +87,7 @@ export default function SessionsTab({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [detail, setDetail] = useState<SessionBinding | null>(null);
   const [busy, setBusy] = useState(false);
+  const [recoveringSessionId, setRecoveringSessionId] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<{ mode: "release" | "delete"; ids: string[] } | null>(null);
 
   const load = useCallback(async (silent = false) => {
@@ -192,6 +195,25 @@ export default function SessionsTab({
     }
   };
 
+  const recoverConversation = async (item: SessionBinding) => {
+    if (item.isInFlight || item.hasConversation || recoveringSessionId) return;
+    setRecoveringSessionId(item.sessionId);
+    try {
+      const result = await recoverSessionConversation(item.sessionId);
+      showToast(
+        result.alreadyBound
+          ? "该会话已经绑定 Postman 上游会话"
+          : `已从 Postman 云端历史恢复上游会话${result.scanned ? `（核对 ${result.scanned} 个候选）` : ""}`,
+        "success",
+      );
+      await load(true);
+    } catch (error: any) {
+      showToast(error.message, "error");
+    } finally {
+      setRecoveringSessionId(null);
+    }
+  };
+
   const execute = async () => {
     if (!confirm || confirm.ids.length === 0) return;
     setBusy(true);
@@ -246,6 +268,7 @@ export default function SessionsTab({
         <div className="stat-cell"><div className="stat-top"><div className="stat-label">最近 30 分钟活跃</div></div><div className="stat-num session-stat-active">{summary.active30m}</div></div>
         <div className="stat-cell"><div className="stat-top"><div className="stat-label">已绑定账号数</div></div><div className="stat-num">{summary.boundAccounts}</div></div>
         <div className="stat-cell"><div className="stat-top"><div className="stat-label">异常绑定数</div></div><div className="stat-num session-stat-error">{summary.abnormal}</div></div>
+        <div className="stat-cell"><div className="stat-top"><div className="stat-label">待恢复上游会话</div></div><div className="stat-num session-stat-recoverable">{summary.recoverable}</div></div>
       </div>
 
       <div className="section-head">
@@ -283,11 +306,11 @@ export default function SessionsTab({
         <table>
           <thead><tr>
             <th style={{ width: 44 }}><label className="checkbox-label"><input type="checkbox" className="checkbox-input" checked={allSelected} onChange={toggleAll}/><span className="checkbox-box"/></label></th>
-            <th>会话标识</th><th>绑定账号</th><th className="table-center">账号状态</th><th className="table-center">对话轮次</th><th>最近活动</th><th className="table-center">会话状态</th><th>操作</th>
+            <th>会话标识</th><th>绑定账号</th><th className="table-center">账号状态</th><th className="table-center">上游会话</th><th className="table-center">对话轮次</th><th>最近活动</th><th className="table-center">会话状态</th><th>操作</th>
           </tr></thead>
           <tbody>
-            {loading ? <tr><td colSpan={8} className="empty-state">加载中...</td></tr>
-              : filtered.length === 0 ? <tr><td colSpan={8} className="empty-state">暂无符合条件的会话。</td></tr>
+            {loading ? <tr><td colSpan={9} className="empty-state">加载中...</td></tr>
+              : filtered.length === 0 ? <tr><td colSpan={9} className="empty-state">暂无符合条件的会话。</td></tr>
               : filtered.map((item) => {
                 const status = accountStatus(item);
                 const state = sessionState(item);
@@ -296,10 +319,12 @@ export default function SessionsTab({
                   <td><div className="session-id-cell"><code title={item.sessionId}>{maskSessionId(item.sessionId)}</code><button className="session-copy-btn" title="复制完整会话 ID" onClick={(event) => { event.stopPropagation(); void copyId(item.sessionId); }}><svg viewBox="0 0 24 24"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg></button></div></td>
                   <td><span className={item.accountEmail ? "session-account" : "session-muted"}>{accountLabel(item)}</span></td>
                   <td className="table-center"><span className={`badge badge-${status.badge}`}>{status.label}</span></td>
+                  <td className="table-center"><span className={`badge ${item.hasConversation ? "badge-active" : "badge-disabled"}`}>{item.hasConversation ? "已绑定" : "待恢复"}</span></td>
                   <td className="table-center">{item.turnCount}</td>
                   <td><span className="session-relative" title={formatDate(item.updatedAt)}>{formatRelative(item.updatedAt)}</span></td>
                   <td className="table-center"><span className={`badge session-badge-${state}`}>{sessionStateLabel(item)}</span></td>
                   <td onClick={(event) => event.stopPropagation()}><div className="row-actions session-row-actions">
+                    {!item.hasConversation && item.accountId !== null && <button className="session-action-btn session-action-recover" disabled={item.isInFlight || recoveringSessionId !== null} onClick={() => void recoverConversation(item)}>{recoveringSessionId === item.sessionId ? "恢复中..." : "恢复上游"}</button>}
                     <button className="session-action-btn" disabled={item.isInFlight} onClick={() => setConfirm({ mode: "release", ids: [item.sessionId] })}>重新分配</button>
                     <button className="session-action-btn session-action-danger" disabled={item.isInFlight} onClick={() => setConfirm({ mode: "delete", ids: [item.sessionId] })}>清除</button>
                   </div></td>
@@ -318,6 +343,8 @@ export default function SessionsTab({
               <dl className="session-detail-list">
                 <div><dt>绑定账号</dt><dd>{accountLabel(detail)}</dd></div>
                 <div><dt>账号状态</dt><dd>{accountStatus(detail).label}</dd></div>
+                <div><dt>Postman 上游会话</dt><dd>{detail.hasConversation ? "已绑定，可直接继续" : "缺失，可尝试从云端历史恢复"}</dd></div>
+                {detail.conversationUpdatedAt && <div><dt>上游会话更新时间</dt><dd>{formatDate(detail.conversationUpdatedAt)}</dd></div>}
                 <div><dt>会话状态</dt><dd>{sessionStateLabel(detail)}</dd></div>
                 <div><dt>对话轮次</dt><dd>{detail.turnCount}</dd></div>
                 <div><dt>估算上下文</dt><dd>{detail.estimatedTokens.toLocaleString()} tokens</dd></div>
@@ -329,6 +356,7 @@ export default function SessionsTab({
             </div>
             <div className="session-drawer-actions">
               {detail.accountId !== null && detail.accountEmail && <button className="dialog-btn" onClick={() => onViewAccount(detail.accountId!)}>查看账号</button>}
+              {!detail.hasConversation && detail.accountId !== null && <button className="dialog-btn dialog-btn-primary" disabled={detail.isInFlight || recoveringSessionId !== null} onClick={() => void recoverConversation(detail)}>{recoveringSessionId === detail.sessionId ? "恢复中..." : "恢复上游会话"}</button>}
               <button className="dialog-btn" disabled={detail.isInFlight} onClick={() => setConfirm({ mode: "release", ids: [detail.sessionId] })}>下次重新分配</button>
               <button className="dialog-btn dialog-btn-danger" disabled={detail.isInFlight} onClick={() => setConfirm({ mode: "delete", ids: [detail.sessionId] })}>清除会话</button>
             </div>

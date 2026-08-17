@@ -3,8 +3,10 @@ import {
   POSTMAN_QUERY_SAFE_CHARS,
   PostmanProvider,
   buildSeedingMessages,
+  inspectPostmanBootstrapPayload,
   isPostmanRequestRejected,
   normalizePostmanTools,
+  rejectOversizedPostmanBootstrap,
 } from "../src/provider/postman";
 import { PostmanStreamReader } from "../src/provider/sse-stream";
 import { config } from "../src/config";
@@ -348,9 +350,11 @@ describe("Postman tool compatibility", () => {
     );
 
     expect(body.input.conversationId).toBe("postman-conversation-1");
-    expect(body.input.query).toContain("[Tool Result id=postman-tool-call-1]");
-    expect(body.input.query).toContain("/workspace/project");
-    expect(body.input.query).toContain("Process these tool results and continue.");
+    expect(body.input.chatType).toBe("TOOL_RESPONSE");
+    expect(body.input.query).toBe("");
+    expect(body.input.toolCallId).toBe("postman-tool-call-1");
+    expect(body.input.toolResponse).toBe("/workspace/project");
+    expect(body.input.toolResponseSummary).toBe("Tool call completed");
   });
 
   test("preserves parallel Anthropic tool-result order and marks failed tool calls", () => {
@@ -406,12 +410,23 @@ describe("Postman tool compatibility", () => {
       String(account.id),
     );
 
-    const firstResult = body.input.query.indexOf("[Tool Result id=tool-call-a]");
-    const secondResult = body.input.query.indexOf("[Tool Error id=tool-call-b]");
-    expect(firstResult).toBeGreaterThanOrEqual(0);
-    expect(secondResult).toBeGreaterThan(firstResult);
-    expect(body.input.query).toContain("resource a");
-    expect(body.input.query).toContain("permission denied");
+    expect(body.input.chatType).toBe("TOOL_RESPONSE");
+    expect(body.input.query).toBe("");
+    expect(body.input.toolResponses).toEqual([
+      {
+        toolCallId: "tool-call-a",
+        content: "resource a",
+        toolResponseSummary: "Tool call completed",
+        toolResponseStatus: "SUCCESS",
+      },
+      {
+        toolCallId: "tool-call-b",
+        content: JSON.stringify([{ type: "text", text: "permission denied" }]),
+        toolResponseSummary: "Tool call failed",
+        toolResponseStatus: "FAILED",
+        toolResponseFailureType: "HANDLED_ERROR",
+      },
+    ]);
   });
 
   test("recognizes the standard MCP isError flag on a Chat Completions tool result", () => {
@@ -450,8 +465,11 @@ describe("Postman tool compatibility", () => {
       String(account.id),
     );
 
-    expect(body.input.query).toContain("[Tool Error id=tool-call-error]");
-    expect(body.input.query).toContain("No command provided");
+    expect(body.input.chatType).toBe("TOOL_RESPONSE");
+    expect(body.input.query).toBe("");
+    expect(body.input.toolCallId).toBe("tool-call-error");
+    expect(body.input.toolResponse).toBe("No command provided");
+    expect(body.input.toolResponseSummary).toBe("Tool call failed");
   });
 
   test("honors a client that disables parallel tool calls", () => {
@@ -664,7 +682,37 @@ describe("Postman tool compatibility", () => {
     expect(body.input.query.length).toBeLessThanOrEqual(POSTMAN_QUERY_SAFE_CHARS);
   });
 
-  test("starts a fresh Postman conversation after local context trimming", () => {
+  test("keeps the existing Postman conversation after local-only history trimming", () => {
+    const provider = new PostmanProvider() as any;
+    setConversationId(account.id, "codex:trimmed-context-preserved", "full-upstream-conversation");
+
+    const body = provider.buildRequestBody(
+      {
+        model: "auto",
+        _sessionId: "codex:trimmed-context-preserved",
+        messages: [
+          { role: "system", content: "Keep the system instruction." },
+          { role: "user", content: "Only the retained recent context." },
+        ],
+      },
+      {
+        postman_sid: "sid",
+        user_id: "user",
+        workspace_id: "workspace",
+        workspace_subdomain: "team",
+      },
+      null,
+      String(account.id),
+    );
+
+    expect(body.input.conversationId).toBe("full-upstream-conversation");
+    expect(body.input.seedingMessages).toBeUndefined();
+    expect(body.input.query).toBe("Only the retained recent context.");
+    expect(getConversationId(account.id, "codex:trimmed-context-preserved"))
+      .toBe("full-upstream-conversation");
+  });
+
+  test("starts a fresh Postman conversation after an explicit reset", () => {
     const provider = new PostmanProvider() as any;
     setConversationId(account.id, "codex:trimmed-context", "stale-full-conversation");
 
@@ -693,6 +741,87 @@ describe("Postman tool compatibility", () => {
     expect(body.input.query).toBe("Only the retained recent context.");
     expect(body.input.seedingMessages[0].content).toContain("Keep the system instruction.");
     expect(getConversationId(account.id, "codex:trimmed-context")).toBeNull();
+  });
+
+  test("rejects an oversized new-conversation bootstrap before calling Postman", () => {
+    const provider = new PostmanProvider() as any;
+    const body = provider.buildRequestBody(
+      {
+        model: "auto",
+        _sessionId: "codex:oversized-bootstrap",
+        messages: [
+          { role: "system", content: "system" },
+          { role: "user", content: "large-history-".repeat(1_000) },
+          { role: "assistant", content: "large-answer-".repeat(1_000) },
+          { role: "user", content: "continue" },
+        ],
+        tools: [{
+          type: "function",
+          function: {
+            name: "shell",
+            parameters: {
+              type: "object",
+              properties: { command: { type: "string" } },
+            },
+          },
+        }],
+      },
+      {
+        postman_sid: "sid",
+        user_id: "user",
+        workspace_id: "workspace",
+        workspace_subdomain: "team",
+      },
+      null,
+      String(account.id),
+    );
+    const serialized = JSON.stringify(body);
+    const stats = inspectPostmanBootstrapPayload(body, serialized);
+    const result = rejectOversizedPostmanBootstrap(body, serialized, 1_024);
+
+    expect(stats.restoredConversation).toBe(false);
+    expect(stats.seedCount).toBe(2);
+    expect(stats.seedBytes).toBeGreaterThan(1_024);
+    expect(stats.toolCount).toBe(1);
+    expect(result).toMatchObject({
+      success: false,
+      requestRejected: true,
+      contextBootstrapTooLarge: true,
+      httpStatus: 413,
+    });
+    expect(result?.error).toContain("no request was sent upstream");
+    expect(result?.error).toContain("MCP tools and the requested model were not changed");
+  });
+
+  test("also guards a new conversation when MCP schemas alone exceed the bootstrap budget", () => {
+    const body = {
+      input: {
+        query: "hello",
+        conversationId: null,
+      },
+      clientTools: {
+        thirdParty: {
+          "proxy-tools": {
+            tools: [{
+              name: "oversized_tool",
+              description: "large schema",
+              parameters: {
+                type: "object",
+                description: "x".repeat(4_096),
+              },
+            }],
+          },
+        },
+      },
+    };
+    const serialized = JSON.stringify(body);
+    const stats = inspectPostmanBootstrapPayload(body, serialized);
+    const result = rejectOversizedPostmanBootstrap(body, serialized, 1_024);
+
+    expect(stats.seedCount).toBe(0);
+    expect(stats.toolCount).toBe(1);
+    expect(result?.contextBootstrapTooLarge).toBe(true);
+    expect(result?.httpStatus).toBe(413);
   });
 
   test("keeps tool results when no Postman conversation can be restored", () => {
@@ -736,6 +865,115 @@ describe("Postman tool compatibility", () => {
     expect(body.input.query).toBe("Process the latest seeded tool results and continue.");
     expect(seededText).toContain("[Tool Result id=call-after-restart]");
     expect(seededText).toContain(toolResult);
+  });
+
+  test("sends oversized tool output through Postman's native tool-response fields", () => {
+    const provider = new PostmanProvider() as any;
+    const sessionId = "codex:large-native-tool-response";
+    const toolResult = "large-tool-output-".repeat(1_000_000);
+    setConversationId(account.id, sessionId, "restored-cloud-conversation");
+
+    const body = provider.buildRequestBody(
+      {
+        model: "gpt-5.6-sol",
+        _sessionId: sessionId,
+        messages: [
+          { role: "user", content: "run the large tool" },
+          {
+            role: "assistant",
+            content: "I will run it now.",
+            tool_calls: [{
+              id: "call-large-output",
+              type: "function",
+              function: { name: "exec_command", arguments: "{\"cmd\":\"large\"}" },
+            }],
+          },
+          {
+            role: "tool",
+            tool_call_id: "call-large-output",
+            content: toolResult,
+          },
+        ],
+      },
+      {
+        postman_sid: "sid",
+        user_id: "user",
+        workspace_id: "workspace",
+        workspace_subdomain: "team",
+      },
+      "GPT_56_SOL",
+      String(account.id),
+    );
+    const serialized = JSON.stringify(body);
+
+    expect(body.input.chatType).toBe("TOOL_RESPONSE");
+    expect(body.input.conversationId).toBe("restored-cloud-conversation");
+    expect(body.input.query).toBe("");
+    expect(body.input.toolCallId).toBe("call-large-output");
+    expect(body.input.toolResponse).toBe(toolResult);
+    expect(body.input.seedingMessages).toBeUndefined();
+    expect(inspectPostmanBootstrapPayload(body, serialized).payloadBytes)
+      .toBeGreaterThan(config.postmanBootstrapMaxBytes);
+    expect(rejectOversizedPostmanBootstrap(
+      body,
+      serialized,
+      config.postmanBootstrapMaxBytes,
+    )).toBeNull();
+  });
+
+  test("rebuilds an oversized bootstrap after cloud conversation recovery", async () => {
+    const provider = new PostmanProvider() as any;
+    const sessionId = "codex:auto-cloud-recovery";
+    const toolResult = "restored-tool-output-".repeat(80_000);
+    provider.recoverConversation = async () => {
+      setConversationId(account.id, sessionId, "cloud-history-conversation");
+      return {
+        recovered: true,
+        conversationId: "cloud-history-conversation",
+        reason: "recovered",
+        score: 1_500,
+        scanned: 10,
+        compatible: 1,
+      };
+    };
+    const request = {
+      model: "gpt-5.6-sol",
+      _sessionId: sessionId,
+      messages: [
+        { role: "user", content: "run it" },
+        {
+          role: "assistant",
+          content: "Running the requested command.",
+          tool_calls: [{
+            id: "call-recovered",
+            type: "function",
+            function: { name: "exec_command", arguments: "{\"cmd\":\"test\"}" },
+          }],
+        },
+        {
+          role: "tool",
+          tool_call_id: "call-recovered",
+          content: toolResult,
+        },
+      ],
+    };
+
+    const prepared = await provider.preparePostmanRequest(
+      account,
+      request,
+      {
+        postman_sid: "sid",
+        user_id: "user",
+        workspace_id: "workspace",
+        workspace_subdomain: "team",
+      },
+      "GPT_56_SOL",
+    );
+
+    expect(prepared.bootstrapRejection).toBeNull();
+    expect(prepared.body.input.conversationId).toBe("cloud-history-conversation");
+    expect(prepared.body.input.chatType).toBe("TOOL_RESPONSE");
+    expect(prepared.body.input.toolResponse).toBe(toolResult);
   });
 
   test("always emits exactly two seed messages without dropping source content", () => {

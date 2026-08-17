@@ -69,16 +69,19 @@ export function restoreConversationId(
   conversationId: string | null | undefined,
   updatedAt: Date | number | null | undefined,
 ): boolean {
-  if (!conversationId || updatedAt === null || updatedAt === undefined) return false;
-  const timestamp = updatedAt instanceof Date
-    ? updatedAt.getTime()
-    : updatedAt < 1_000_000_000_000
-      ? updatedAt * 1000
-      : updatedAt;
-  if (!Number.isFinite(timestamp) || Date.now() - timestamp > CONVERSATION_TTL_MS) {
-    return false;
+  if (!conversationId) return false;
+  if (updatedAt !== null && updatedAt !== undefined) {
+    const timestamp = updatedAt instanceof Date
+      ? updatedAt.getTime()
+      : updatedAt < 1_000_000_000_000
+        ? updatedAt * 1000
+        : updatedAt;
+    if (!Number.isFinite(timestamp)) return false;
   }
-  setConversationId(accountId, sessionId, conversationId, timestamp);
+  // The in-memory TTL is only a cache bound. A persisted Postman
+  // conversation may remain valid after a long local idle period, so loading
+  // it from SQLite refreshes the cache instead of discarding the durable ID.
+  setConversationId(accountId, sessionId, conversationId, Date.now());
   return true;
 }
 

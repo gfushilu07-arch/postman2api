@@ -34,5 +34,9 @@ tokens/
 # postman-register 运行时验证文件
 packages/postman-register/runtime/
 
+# 主项目本地验证、备份和逆向分析文件
+runtime/
+undefined/
+
 # tokens 目录的本地副本（同样含账号凭据，禁止提交）
 tokens copy/

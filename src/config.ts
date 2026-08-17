@@ -43,6 +43,18 @@ const quotaSafeStreamBufferBytes = positiveNumber(
 );
 const streamKeepaliveIntervalMs = positiveNumber(process.env.STREAM_KEEPALIVE_INTERVAL_MS, 10_000);
 const postmanFetchVerbose = /^(1|true|yes)$/i.test(process.env.POSTMAN_FETCH_VERBOSE || "");
+const postmanBootstrapMaxBytes = positiveInteger(
+  process.env.POSTMAN_BOOTSTRAP_MAX_BYTES,
+  16 * 1024 * 1024,
+);
+const postmanConversationRecoveryTimeoutMs = positiveInteger(
+  process.env.POSTMAN_CONVERSATION_RECOVERY_TIMEOUT_MS,
+  30_000,
+);
+const postmanConversationRecoveryMaxItems = positiveInteger(
+  process.env.POSTMAN_CONVERSATION_RECOVERY_MAX_ITEMS,
+  100,
+);
 const accountMaxConcurrency = positiveInteger(process.env.ACCOUNT_MAX_CONCURRENCY, 2);
 const accountCapacityWaitMs = positiveInteger(process.env.ACCOUNT_CAPACITY_WAIT_MS, 60_000);
 const sessionRebalanceIdleMs = positiveInteger(process.env.SESSION_REBALANCE_IDLE_MS, 10 * 60 * 1000);
@@ -80,6 +92,9 @@ export const config = {
   quotaSafeStreamBufferBytes,
   streamKeepaliveIntervalMs,
   postmanFetchVerbose,
+  postmanBootstrapMaxBytes,
+  postmanConversationRecoveryTimeoutMs,
+  postmanConversationRecoveryMaxItems,
   accountMaxConcurrency,
   accountCapacityWaitMs,
   sessionRebalanceIdleMs,

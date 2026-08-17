@@ -1,7 +1,7 @@
 {
   "name": "postman2api-dashboard",
   "private": true,
-  "version": "1.0.18",
+  "version": "1.0.21",
   "type": "module",
   "scripts": {
     "dev": "vite",

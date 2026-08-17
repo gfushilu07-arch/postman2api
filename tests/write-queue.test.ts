@@ -7,6 +7,7 @@ import {
   clearPersistedSessionConversation,
   flushDatabaseWriteQueue,
   initializeDatabaseWriteQueue,
+  restorePersistedSessionConversation,
   writeRequestLog,
   writeSessionState,
 } from "../src/db/write-queue";
@@ -104,5 +105,19 @@ describe("SQLite serialized write queue", () => {
     expect(saved?.conversationId).toBeNull();
     expect(saved?.conversationUpdatedAt).toBeNull();
     expect(saved?.messages).toContain("hello");
+
+    const restoredAt = conversationUpdatedAt + 60;
+    await restorePersistedSessionConversation(
+      sessionId,
+      accountId,
+      "postman-conversation-restored",
+      restoredAt,
+    );
+    await flushDatabaseWriteQueue();
+    [saved] = await db.select().from(sessionStates)
+      .where(eq(sessionStates.sessionId, sessionId))
+      .limit(1);
+    expect(saved?.conversationId).toBe("postman-conversation-restored");
+    expect(saved?.conversationUpdatedAt?.getTime()).toBe(restoredAt * 1000);
   });
 });

@@ -96,6 +96,9 @@ describe("session binding management", () => {
         body.data.flatMap((item: any) => item.accountId === null ? [] : [item.accountId]),
       ).size,
       abnormal: body.data.filter((item: any) => item.abnormal).length,
+      recoverable: body.data.filter(
+        (item: any) => item.accountId !== null && !item.hasConversation,
+      ).length,
     });
     expect(body.data.find((item: any) => item.sessionId === activeSession)).toMatchObject({
       accountId: active.id,

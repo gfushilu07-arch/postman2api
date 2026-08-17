@@ -7,14 +7,10 @@ import {
   commitSession,
   prepareSession,
 } from "../provider/session-state";
-import { deleteConversationId } from "../provider/conversation-store";
 import { acquireSessionLock } from "./session-lock";
 import { config } from "../config";
 import { normalizeReasoningEffort } from "../provider/base";
-import {
-  clearPersistedSessionConversation,
-  writeRequestLog,
-} from "../db/write-queue";
+import { writeRequestLog } from "../db/write-queue";
 import { trimContextMessages } from "../provider/context-trimmer";
 import { getContextMaxTokens } from "../settings/runtime";
 
@@ -49,11 +45,6 @@ export async function handleChatCompletion(
     );
     body.messages = trimmedContext.messages;
     if (trimmedContext.trimmed) {
-      body._resetConversation = true;
-      if (prepared.accountId !== null) {
-        deleteConversationId(prepared.accountId, body._sessionId);
-        await clearPersistedSessionConversation(body._sessionId, prepared.accountId);
-      }
       console.info("[context] Trimmed request history", {
         maxTokens: trimmedContext.maxTokens,
         estimatedTokensBefore: trimmedContext.estimatedTokensBefore,
@@ -61,6 +52,7 @@ export async function handleChatCompletion(
         droppedMessages: trimmedContext.droppedMessages,
         droppedTurns: trimmedContext.droppedTurns,
         mandatoryTokensExceeded: trimmedContext.mandatoryTokensExceeded,
+        upstreamConversationReset: body._resetConversation === true,
       });
     }
     const routed = await routeRequest(body, stream);
@@ -85,8 +77,9 @@ export async function handleChatCompletion(
         cleanupAfterReturn = false;
         return response;
       } catch (error) {
-        deleteConversationId(account.id, body._sessionId);
-        await clearPersistedSessionConversation(body._sessionId, account.id);
+        // Building the downstream wrapper cannot prove that Postman deleted or
+        // invalidated its conversation. Preserve the durable ID so an old
+        // session can continue after a local/transport failure.
         pool.trackRequestEnd(account.id, routed.leaseId);
         throw error;
       }
@@ -309,8 +302,9 @@ function wrapQuotaSafeStream(
           const errorMessage = attemptError instanceof Error
             ? attemptError.message
             : String(attemptError);
-          deleteConversationId(attempt.account.id, ctx.sessionId);
-          await clearPersistedSessionConversation(ctx.sessionId, attempt.account.id);
+          // A socket close, timeout, or quota transition does not mean the
+          // upstream conversation disappeared. Clearing it here made long
+          // sessions impossible to resume after one interrupted stream.
           await recordRequest({
             ...requestLogContext(ctx.request),
             accountId: attempt.account.id,
@@ -434,7 +428,13 @@ function errorResponse(message: string, status: number): Response {
 
 function providerErrorStatus(result: RouteResult["result"]): number {
   if (result.requestRejected) {
-    return result.httpStatus === 400 ? 400 : 422;
+    if (
+      result.httpStatus !== undefined
+      && [400, 409, 413, 422].includes(result.httpStatus)
+    ) {
+      return result.httpStatus;
+    }
+    return 422;
   }
   if (result.modelMismatch) return 502;
   return 502;

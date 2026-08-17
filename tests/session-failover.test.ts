@@ -21,6 +21,10 @@ import {
   getConversationId,
   setConversationId,
 } from "../src/provider/conversation-store";
+import {
+  clearRuntimeSettingsCache,
+  setCachedContextMaxTokens,
+} from "../src/settings/runtime";
 
 const sessions = new Set<string>();
 const accountIds = new Set<number>();
@@ -49,6 +53,7 @@ async function createAccount(label: string) {
 }
 
 afterEach(async () => {
+  clearRuntimeSettingsCache();
   clearSessionLocks();
   clearConversations();
   pool.clearRuntimeState();
@@ -104,6 +109,71 @@ describe("persistent session state", () => {
       ...fullHistory,
       { role: "assistant", content: "latest answer" },
     ]);
+  });
+
+  test("local history trimming preserves a restorable same-account conversation", async () => {
+    const id = sessionId("trim-preserves-conversation");
+    const account = await createAccount("trim-preserves-conversation");
+    const poolAny = pool as any;
+    const providerAny = provider as any;
+    const originals = {
+      getActiveAccounts: poolAny.getActiveAccounts,
+      chatCompletion: providerAny.chatCompletion,
+    };
+    let capturedRequest: any;
+
+    setConversationId(account.id, id, "postman-long-context-conversation");
+    await commitSession(
+      id,
+      [{ role: "user", content: "old question ".repeat(100) }],
+      { role: "assistant", content: "old answer ".repeat(100) },
+      account.id,
+    );
+    clearConversations();
+    pool.clearRuntimeState();
+    setCachedContextMaxTokens(30);
+
+    try {
+      poolAny.getActiveAccounts = async () => [account];
+      providerAny.chatCompletion = async (_selectedAccount: any, request: any) => {
+        capturedRequest = request;
+        expect(getConversationId(account.id, id)).toBe("postman-long-context-conversation");
+        return {
+          success: true,
+          response: {
+            id: "response",
+            object: "chat.completion",
+            created: 0,
+            model: request.model,
+            choices: [{
+              index: 0,
+              message: { role: "assistant", content: "continued" },
+              finish_reason: "stop",
+            }],
+            usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+          },
+        };
+      };
+
+      const response = await handleChatCompletion({
+        model: "auto",
+        messages: [{ role: "user", content: "latest question" }],
+        stream: false,
+        _sessionId: id,
+      });
+      const [savedSession] = await db.select().from(sessionStates)
+        .where(eq(sessionStates.sessionId, id)).limit(1);
+
+      expect(response.status).toBe(200);
+      expect(capturedRequest._resetConversation).not.toBe(true);
+      expect(capturedRequest.messages).toEqual([
+        { role: "user", content: "latest question" },
+      ]);
+      expect(savedSession?.conversationId).toBe("postman-long-context-conversation");
+    } finally {
+      poolAny.getActiveAccounts = originals.getActiveAccounts;
+      providerAny.chatCompletion = originals.chatCompletion;
+    }
   });
 
   test("persists the replacement account after a successful failover", async () => {
@@ -185,6 +255,85 @@ describe("persistent session state", () => {
       poolAny.markExhausted = originals.markExhausted;
       poolAny.markUsed = originals.markUsed;
       providerAny.chatCompletion = originals.chatCompletion;
+    }
+  });
+
+  test("automatically bootstraps the replacement account and completes the same request", async () => {
+    const id = sessionId("real-provider-failover");
+    const first = await createAccount("real-provider-first");
+    const second = await createAccount("real-provider-second");
+    const poolAny = pool as any;
+    const requestBodies: any[] = [];
+    const originalFetch = globalThis.fetch;
+    const longHistory = "long-context-".repeat(100_000);
+
+    await commitSession(
+      id,
+      [{ role: "user", content: `remember this: ${longHistory}` }],
+      { role: "assistant", content: `previous answer: ${longHistory}` },
+      first.id,
+    );
+    setConversationId(first.id, id, "original-postman-conversation");
+    // Keep this integration case lossless so the replacement bootstrap is
+    // intentionally larger than the former 1 MiB guard.
+    setCachedContextMaxTokens(0);
+    pool.clearRuntimeState();
+
+    try {
+      globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body || "{}"));
+        requestBodies.push(body);
+        const cookie = String(init?.headers && new Headers(init.headers).get("Cookie") || "");
+
+        if (cookie.includes("sid-real-provider-first")) {
+          return new Response(JSON.stringify({
+            message: "Your team has exceeded its monthly AI credit limit",
+          }), { status: 402 });
+        }
+
+        const replacementStream = [
+          `data: ${JSON.stringify({
+            eventType: "conversation",
+            data: { id: "replacement-postman-conversation" },
+          })}`,
+          `data: ${JSON.stringify({
+            eventType: "textChunk",
+            data: { textContent: "continued on replacement account" },
+          })}`,
+        ].join("\n") + "\n";
+        return new Response(replacementStream, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }) as typeof fetch;
+
+      const response = await handleChatCompletion({
+        model: "auto",
+        messages: [{ role: "user", content: "continue after quota exhaustion" }],
+        stream: false,
+        _sessionId: id,
+      });
+      const [savedSession] = await db.select().from(sessionStates)
+        .where(eq(sessionStates.sessionId, id)).limit(1);
+      const [savedFirst] = await db.select().from(accounts)
+        .where(eq(accounts.id, first.id)).limit(1);
+
+      expect(response.status).toBe(200);
+      expect(requestBodies).toHaveLength(2);
+      expect(requestBodies[0].input.conversationId).toBe("original-postman-conversation");
+      expect(requestBodies[1].input.conversationId).toBeNull();
+      expect(requestBodies[1].input.seedingMessages).toHaveLength(2);
+      expect(requestBodies[1].input.seedingMessages[0].content).toContain(longHistory);
+      expect(JSON.stringify(requestBodies[1]).length).toBeGreaterThan(1024 * 1024);
+      expect(savedFirst?.status).toBe("exhausted");
+      expect(savedSession?.accountId).toBe(second.id);
+      expect(savedSession?.conversationId).toBe("replacement-postman-conversation");
+      expect(await getSessionMessages(id)).toContainEqual({
+        role: "assistant",
+        content: "continued on replacement account",
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
     }
   });
 
@@ -271,6 +420,62 @@ describe("persistent session state", () => {
       expect(payload.error.type).toBe("invalid_request_error");
       expect(savedAccount?.status).toBe("active");
       expect(savedAccount?.errorMessage).toBeNull();
+    } finally {
+      poolAny.getActiveAccounts = originals.getActiveAccounts;
+      providerAny.chatCompletion = originals.chatCompletion;
+    }
+  });
+
+  test("returns oversized bootstrap as 413 and rolls back a provisional account binding", async () => {
+    const id = sessionId("bootstrap-too-large");
+    const original = await createAccount("bootstrap-original");
+    const replacement = await createAccount("bootstrap-replacement");
+    const poolAny = pool as any;
+    const providerAny = provider as any;
+    const originals = {
+      getActiveAccounts: poolAny.getActiveAccounts,
+      chatCompletion: providerAny.chatCompletion,
+    };
+
+    await commitSession(
+      id,
+      [{ role: "user", content: "original account context" }],
+      { role: "assistant", content: "original response" },
+      original.id,
+    );
+    await db.update(accounts).set({ status: "exhausted" })
+      .where(eq(accounts.id, original.id));
+    clearConversations();
+    pool.clearRuntimeState();
+
+    try {
+      poolAny.getActiveAccounts = async () => [replacement];
+      providerAny.chatCompletion = async () => ({
+        success: false,
+        requestRejected: true,
+        contextBootstrapTooLarge: true,
+        httpStatus: 413,
+        error: "Postman conversation bootstrap payload is too large",
+      });
+
+      const response = await handleChatCompletion({
+        model: "auto",
+        messages: [{ role: "user", content: "continue on another account" }],
+        stream: false,
+        _sessionId: id,
+      });
+      const payload = await response.json() as any;
+      const [savedSession] = await db.select().from(sessionStates)
+        .where(eq(sessionStates.sessionId, id)).limit(1);
+      const [savedReplacement] = await db.select().from(accounts)
+        .where(eq(accounts.id, replacement.id)).limit(1);
+
+      expect(response.status).toBe(413);
+      expect(payload.error.type).toBe("invalid_request_error");
+      expect(savedSession?.accountId).toBe(original.id);
+      expect(savedReplacement?.status).toBe("active");
+      expect(savedReplacement?.errorMessage).toBeNull();
+      expect(poolAny.sessionBindings.has(id)).toBe(false);
     } finally {
       poolAny.getActiveAccounts = originals.getActiveAccounts;
       providerAny.chatCompletion = originals.chatCompletion;

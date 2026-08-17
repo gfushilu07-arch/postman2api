@@ -120,6 +120,8 @@ export interface SessionBinding {
   createdAt: string;
   updatedAt: string;
   isInFlight: boolean;
+  hasConversation: boolean;
+  conversationUpdatedAt?: string | null;
   abnormal: boolean;
 }
 
@@ -128,6 +130,7 @@ export interface SessionBindingSummary {
   active30m: number;
   boundAccounts: number;
   abnormal: number;
+  recoverable: number;
 }
 
 export interface SessionBindingsResponse {
@@ -210,6 +213,20 @@ export async function releaseSessionBindings(sessionIds: string[]): Promise<{ su
   return api(sessionIds.length > 1 ? "/api/sessions/batch-release" : "/api/sessions/release", {
     method: "POST",
     body: JSON.stringify({ sessionIds }),
+  });
+}
+
+export async function recoverSessionConversation(sessionId: string): Promise<{
+  success: boolean;
+  recovered: boolean;
+  alreadyBound?: boolean;
+  conversationId?: string;
+  score?: number;
+  scanned?: number;
+}> {
+  return api("/api/sessions/recover", {
+    method: "POST",
+    body: JSON.stringify({ sessionId }),
   });
 }
 

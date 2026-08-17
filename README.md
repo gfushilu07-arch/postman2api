@@ -269,6 +269,9 @@ curl http://localhost:1930/v1/models \
 | `REQUEST_LOG_CLEANUP_INTERVAL_MS` | `600000` | 请求详情与过期会话检查周期，默认 10 分钟。 |
 | `SESSION_RETENTION_DAYS` | `30` | 会话上下文允许的最长闲置天数。 |
 | `CONTEXT_MAX_TOKENS` | `500000` | 单次请求的最大估算上下文 Token；超出后从最早的完整轮次开始裁剪，`0` 表示关闭。 |
+| `POSTMAN_BOOTSTRAP_MAX_BYTES` | `16777216` | 没有可恢复的上游会话时，新 Postman 会话初始化请求的最大字节数，默认 16 MiB；账号额度耗尽切换账号时会使用完整本地上下文初始化新会话，超限返回 413，不会静默删除上下文、MCP 工具或更换模型。 |
+| `POSTMAN_CONVERSATION_RECOVERY_TIMEOUT_MS` | `30000` | 查询 Postman 云端会话历史时，每个请求的超时时间。 |
+| `POSTMAN_CONVERSATION_RECOVERY_MAX_ITEMS` | `100` | 旧会话自动恢复时最多检查的云端候选数；仅唯一高置信匹配会写回。 |
 | `TTFB_TIMEOUT_MS` | `480000` | 等待上游响应头的最长时间，默认 8 分钟；MCP 工具较多时首包可能明显变慢。 |
 | `STREAM_READ_TIMEOUT_MS` | `300000` | 流式响应分块之间的最大空闲时间。 |
 | `PROVIDER_REQUEST_TIMEOUT_MS` | `480000` | 提供商请求的兜底超时，默认 8 分钟。 |
@@ -282,11 +285,41 @@ curl http://localhost:1930/v1/models \
 
 上下文裁剪不会摘要或截断单条消息，而是从发往 Postman 的请求中从最早的完整对话轮次开始删除。
 系统指令、最新一轮对话以及关联的工具调用与工具结果会作为完整单元保留。
-发生裁剪时，服务会清除原 Postman `conversationId` 并使用裁剪后的上下文创建新会话，
-避免 Postman 上游重新补回已经删除的历史。由于 Postman 未公开模型 tokenizer，
+发生本地裁剪时，如果仍绑定原账号且 Postman `conversationId` 可恢复，服务会继续使用
+原上游会话，只发送最新提问或工具结果，不会因为本地裁剪重复上传完整历史。由于 Postman 未公开模型 tokenizer，
 Token 数量采用偏保守估算；若系统指令或最新一轮本身已超过上限，程序会完整保留它们而不会静默破坏当前请求。
 裁剪不会删除 Codex 的会话标识，也不会覆盖 SQLite 中保存的完整本地会话记录；
 请求成功后，裁剪后的请求与回复会追加回完整本地记录，下一次请求仍会基于完整记录重新计算裁剪范围。
+
+账号切换、会话分叉或上游会话丢失时，服务需要通过 `seedingMessages` 初始化新的
+Postman 会话。初始化请求超过 `POSTMAN_BOOTSTRAP_MAX_BYTES` 时会直接返回 413，并保留
+完整本地上下文；服务不会自动删除 MCP 工具、裁掉不可拆分的最新一轮或更换模型。
+
+### 旧会话恢复
+
+SQLite 中已有 `conversationId` 时，即使服务重启或会话闲置超过 6 小时，也会继续加载该
+持久化 ID；内存 TTL 只用于限制缓存，不再判定云端会话失效。网络断开、流式读取失败和
+额度切换也不会再直接清空持久化 `conversationId`。
+
+如果旧记录已经缺失 `conversationId`，程序会在超大初始化请求或 MCP 工具续接前查询
+**原绑定账号**的 Postman 云端历史，并使用以下条件恢复：
+
+- 请求模型一致；
+- 云端状态能接受当前用户消息或工具结果；
+- 最近 assistant 内容、reasoning、工具名称/参数和 `toolCallId` 与本地 SQLite 历史一致；
+- 只有一个候选达到高置信阈值；存在歧义时拒绝自动绑定。
+
+也可以在 `/sessions` 的会话列表或详情抽屉中点击“恢复上游会话”进行只读匹配。恢复操作
+不会向模型发送消息，也不会消耗对话上下文；成功后只写回匹配到的 `conversationId`。
+Postman 会话不能跨账号使用。如果请求过程中原账号额度耗尽，服务会先将原账号标记为
+`exhausted`，再选择其他可用账号；新账号不会复用旧 `conversationId`，而是使用完整的
+本地会话历史初始化新的 Postman 会话，然后继续当前请求。只有初始化请求超过配置的
+`POSTMAN_BOOTSTRAP_MAX_BYTES`，才会返回 413 并保留本地上下文，不会静默丢失历史、MCP
+工具或更换模型。
+
+MCP 工具结果会按 Postman 官方协议使用 `chatType: TOOL_RESPONSE` 和
+`toolCallId/toolResponse`（并行结果使用 `toolResponses`）回传，不再塞进普通 `query`。
+因此较大的 shell/MCP 输出不会再触发 Agent Mode 的 10,000 字符用户输入限制。
 
 数据库按运行环境硬隔离：`bun start`、`bun run dev` 和 `bun run dev:api`
 固定使用 `DEV_DATABASE_PATH`；`bun test` 使用 `TEST_DATABASE_PATH`；只有

@@ -32,6 +32,13 @@ import {
   getConversationId,
   setConversationId,
 } from "./conversation-store";
+import { Buffer } from "node:buffer";
+import {
+  recoverPostmanConversation,
+  shouldAttemptPostmanConversationRecovery,
+  type PostmanConversationRecoveryResult,
+} from "./postman-conversation-recovery";
+import { restorePersistedSessionConversation } from "../db/write-queue";
 
 const DEFAULT_APP_VERSION = "12.15.4-260616-1202";
 const CHAT_ENDPOINT = "/_gw/chat";
@@ -70,6 +77,29 @@ interface SplitMessagesResult {
   query: string;
   seedingMessages: PostmanSeedMessage[] | null;
   conversationId: string | null;
+  toolResponses: PostmanToolResponse[];
+}
+
+interface PostmanToolResponse {
+  toolCallId: string;
+  content: string;
+  toolResponseSummary: string;
+  toolResponseStatus: "SUCCESS" | "FAILED";
+  toolResponseFailureType?: "HANDLED_ERROR";
+}
+
+interface PreparedPostmanRequest {
+  body: any;
+  serializedBody: string;
+  bootstrapRejection: ProviderResult | null;
+}
+
+export interface PostmanBootstrapPayloadStats {
+  payloadBytes: number;
+  seedBytes: number;
+  seedCount: number;
+  toolCount: number;
+  restoredConversation: boolean;
 }
 
 const EMPTY_TOOL_PARAMETERS: Record<string, unknown> = {
@@ -203,6 +233,13 @@ export class PostmanProvider extends BaseProvider {
     };
   }
 
+  private buildConversationHeaders(tokens: PostmanTokens): Record<string, string> {
+    return {
+      ...this.buildHeaders(tokens),
+      Accept: "application/json",
+    };
+  }
+
   private buildThirdPartyTools(tools?: any[]): Record<string, { tools: PostmanMCPTool[] }> {
     const mcpTools = normalizePostmanTools(tools);
     if (mcpTools.length === 0) return {};
@@ -216,6 +253,9 @@ export class PostmanProvider extends BaseProvider {
     const lastMsg = messages[messages.length - 1];
     const isToolResultTail = lastMsg?.role === "tool" || isAnthropicToolResult(lastMsg);
     const hasConversationId = Boolean(conversationId);
+    const toolResponses = isToolResultTail
+      ? collectTrailingToolResponses(messages)
+      : [];
 
     let query: string;
     let queryMsgIdx: number;
@@ -230,16 +270,28 @@ export class PostmanProvider extends BaseProvider {
       query = idx >= 0 ? renderMessageContent(messages[idx]!.content) : CONTINUE_QUERY;
     }
 
-    // A normal short turn can continue directly on the persisted Postman
-    // conversation. The local history is intentionally not re-sent here.
-    if (hasConversationId && query.length <= POSTMAN_QUERY_SAFE_CHARS) {
-      return { query, seedingMessages: null, conversationId };
+    // Postman's native tool continuation protocol carries tool output outside
+    // input.query. This avoids the Agent Mode 10k live-query limit and, more
+    // importantly, attaches the result to the exact pending MCP tool call.
+    if (hasConversationId && toolResponses.length > 0) {
+      return {
+        query: "",
+        seedingMessages: null,
+        conversationId,
+        toolResponses,
+      };
     }
 
-    // With no usable upstream conversation, preserve the complete local
-    // history in Postman's required two-message seed pair. The gateway rejects
-    // more than two seeding messages, but accepts a large seed body; its 10k
-    // Agent Mode limit applies to the live query instead.
+    // A normal short user turn can continue directly on the persisted Postman
+    // conversation. The local history is intentionally not re-sent here.
+    if (hasConversationId && query.length <= POSTMAN_QUERY_SAFE_CHARS) {
+      return { query, seedingMessages: null, conversationId, toolResponses: [] };
+    }
+
+    // With no usable upstream conversation, preserve the complete retained
+    // local history in Postman's required two-message seed pair. The gateway
+    // rejects more than two seeding messages, and the serialized bootstrap is
+    // checked against a separate transport budget before it is sent.
     //
     // Tool-result turns must be seeded in full when no conversation exists.
     // Oversized current turns also move into the seed and start a fresh
@@ -259,6 +311,7 @@ export class PostmanProvider extends BaseProvider {
       query,
       seedingMessages: seedingMessages.length > 0 ? seedingMessages : null,
       conversationId: null,
+      toolResponses: [],
     };
   }
 
@@ -278,12 +331,13 @@ export class PostmanProvider extends BaseProvider {
       query,
       seedingMessages,
       conversationId,
+      toolResponses,
     } = this.splitMessages(request.messages, storedConversationId);
     const thirdParty = this.buildThirdPartyTools(request.tools);
     const hasTools = Object.keys(thirdParty).length > 0;
 
     const input: any = {
-      chatType: "USER_QUERY",
+      chatType: toolResponses.length > 0 ? "TOOL_RESPONSE" : "USER_QUERY",
       query,
       toolResponse: "",
       useCase: null,
@@ -295,6 +349,18 @@ export class PostmanProvider extends BaseProvider {
 
     if (!conversationId && seedingMessages) {
       input.seedingMessages = seedingMessages;
+    }
+    if (conversationId && toolResponses.length === 1) {
+      const [toolResponse] = toolResponses;
+      input.toolCallId = toolResponse!.toolCallId;
+      input.toolResponse = toolResponse!.content;
+      input.toolResponseSummary = toolResponse!.toolResponseSummary;
+    } else if (conversationId && toolResponses.length > 1) {
+      // Postman's current gateway accepts the same toolResponses shape used by
+      // its official client when several MCP calls complete together. We do
+      // not invent a toolCallGroupId because Postman does not expose it in the
+      // Chat Completions tool-call stream.
+      input.toolResponses = toolResponses;
     }
 
     const body: any = {
@@ -342,6 +408,146 @@ export class PostmanProvider extends BaseProvider {
     return body;
   }
 
+  async recoverConversation(
+    account: Account,
+    request: Pick<
+      ChatCompletionRequest,
+      "model" | "messages" | "_sessionId" | "_resetConversation" | "signal"
+    >,
+  ): Promise<PostmanConversationRecoveryResult> {
+    if (!request._sessionId || request._resetConversation) {
+      return {
+        recovered: false,
+        reason: "no_local_anchor",
+        scanned: 0,
+        compatible: 0,
+      };
+    }
+    const existingConversationId = getConversationId(account.id, request._sessionId);
+    if (existingConversationId) {
+      return {
+        recovered: true,
+        conversationId: existingConversationId,
+        score: 0,
+        reason: "recovered",
+        scanned: 0,
+        compatible: 1,
+      };
+    }
+
+    const tokens = this.getTokens(account);
+    if (!tokens) {
+      return {
+        recovered: false,
+        reason: "history_error",
+        scanned: 0,
+        compatible: 0,
+        error: "Invalid or missing Postman tokens",
+      };
+    }
+    const postmanModel = this.resolveModel(request.model);
+    if (postmanModel === undefined) {
+      return {
+        recovered: false,
+        reason: "history_error",
+        scanned: 0,
+        compatible: 0,
+        error: `Invalid model: ${request.model}`,
+      };
+    }
+
+    const recovery = await recoverPostmanConversation({
+      tokens,
+      messages: request.messages,
+      expectedModelKey: postmanModel,
+      headers: this.buildConversationHeaders(tokens),
+      signal: request.signal,
+      maxConversations: config.postmanConversationRecoveryMaxItems,
+      requestTimeoutMs: config.postmanConversationRecoveryTimeoutMs,
+    });
+    if (!recovery.recovered || !recovery.conversationId) {
+      if (recovery.reason === "history_error") {
+        console.warn("[postman] conversation recovery failed", {
+          accountId: account.id,
+          sessionId: request._sessionId,
+          reason: recovery.reason,
+          error: recovery.error,
+        });
+      }
+      return recovery;
+    }
+
+    try {
+      setConversationId(account.id, request._sessionId, recovery.conversationId);
+      await restorePersistedSessionConversation(
+        request._sessionId,
+        account.id,
+        recovery.conversationId,
+      );
+      console.info("[postman] recovered cloud conversation", {
+        accountId: account.id,
+        sessionId: request._sessionId,
+        conversationId: recovery.conversationId,
+        score: recovery.score,
+        scanned: recovery.scanned,
+        compatible: recovery.compatible,
+      });
+      return recovery;
+    } catch (error) {
+      deleteConversationId(account.id, request._sessionId);
+      return {
+        recovered: false,
+        reason: "history_error",
+        scanned: recovery.scanned,
+        compatible: recovery.compatible,
+        error: `Failed to persist recovered conversation: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      };
+    }
+  }
+
+  private async preparePostmanRequest(
+    account: Account,
+    request: ChatCompletionRequest,
+    tokens: PostmanTokens,
+    postmanModel: string | null,
+  ): Promise<PreparedPostmanRequest> {
+    const hadStoredConversation = !request._resetConversation
+      && Boolean(getConversationId(account.id, request._sessionId));
+    let body = this.buildRequestBody(request, tokens, postmanModel, String(account.id));
+    let serializedBody = JSON.stringify(body);
+    let bootstrapRejection = rejectOversizedPostmanBootstrap(
+      body,
+      serializedBody,
+      config.postmanBootstrapMaxBytes,
+    );
+
+    const shouldRecover = (
+      !hadStoredConversation
+      && Boolean(request._sessionId)
+      && !request._resetConversation
+      && (
+        Boolean(bootstrapRejection)
+        || shouldAttemptPostmanConversationRecovery(request.messages)
+      )
+    );
+    if (shouldRecover) {
+      const recovery = await this.recoverConversation(account, request);
+      if (recovery.recovered) {
+        body = this.buildRequestBody(request, tokens, postmanModel, String(account.id));
+        serializedBody = JSON.stringify(body);
+        bootstrapRejection = rejectOversizedPostmanBootstrap(
+          body,
+          serializedBody,
+          config.postmanBootstrapMaxBytes,
+        );
+      }
+    }
+
+    return { body, serializedBody, bootstrapRejection };
+  }
+
   async chatCompletion(account: Account, request: ChatCompletionRequest): Promise<ProviderResult> {
     const postmanModel = this.resolveModel(request.model);
     if (postmanModel === undefined) return { success: false, error: `Invalid model: ${request.model}` };
@@ -350,12 +556,20 @@ export class PostmanProvider extends BaseProvider {
     if (!tokens) return { success: false, error: "Invalid or missing Postman tokens" };
 
     const completionId = this.generateId();
-    const body = this.buildRequestBody(request, tokens, postmanModel, String(account.id));
+    const {
+      body,
+      serializedBody,
+      bootstrapRejection,
+    } = await this.preparePostmanRequest(account, request, tokens, postmanModel);
+    if (bootstrapRejection) {
+      logPostmanPayloadDiagnostics("rejected", body, bootstrapRejection.error, serializedBody);
+      return bootstrapRejection;
+    }
 
     try {
       const response = await this.fetchWithTimeout(
         `https://${tokens.workspace_subdomain}.postman.co${CHAT_ENDPOINT}`,
-        { method: "POST", headers: this.buildHeaders(tokens), body: JSON.stringify(body) },
+        { method: "POST", headers: this.buildHeaders(tokens), body: serializedBody },
         config.providerRequestTimeoutMs, config.ttfbTimeoutMs, request.signal,
         { verbose: config.postmanFetchVerbose, context: "Postman chat" },
       );
@@ -482,12 +696,20 @@ export class PostmanProvider extends BaseProvider {
     const tokens = this.getTokens(account);
     if (!tokens) return { success: false, error: "Invalid or missing Postman tokens" };
 
-    const body = this.buildRequestBody(request, tokens, postmanModel, String(account.id));
+    const {
+      body,
+      serializedBody,
+      bootstrapRejection,
+    } = await this.preparePostmanRequest(account, request, tokens, postmanModel);
+    if (bootstrapRejection) {
+      logPostmanPayloadDiagnostics("rejected", body, bootstrapRejection.error, serializedBody);
+      return bootstrapRejection;
+    }
 
     try {
       const response = await this.fetchWithTimeout(
         `https://${tokens.workspace_subdomain}.postman.co${CHAT_ENDPOINT}`,
-        { method: "POST", headers: this.buildHeaders(tokens), body: JSON.stringify(body) },
+        { method: "POST", headers: this.buildHeaders(tokens), body: serializedBody },
         config.providerRequestTimeoutMs, config.ttfbTimeoutMs, request.signal,
         { verbose: config.postmanFetchVerbose, context: "Postman chat" },
       );
@@ -1051,6 +1273,55 @@ function renderTrailingToolResults(messages: ChatMessage[]): string {
   return parts.join("\n\n");
 }
 
+export function collectTrailingToolResponses(messages: ChatMessage[]): PostmanToolResponse[] {
+  const responses: PostmanToolResponse[] = [];
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]!;
+    if (message.role === "tool") {
+      const toolCallId = firstNonEmptyString(message.tool_call_id);
+      if (!toolCallId) break;
+      const isError = Boolean((message as any).is_error || (message as any).isError);
+      responses.unshift(buildPostmanToolResponse(
+        toolCallId,
+        renderMessageContent(message.content),
+        isError,
+      ));
+      continue;
+    }
+
+    if (isAnthropicToolResult(message) && Array.isArray(message.content)) {
+      const blocks = message.content.filter((block: any) => block?.type === "tool_result");
+      for (let blockIndex = blocks.length - 1; blockIndex >= 0; blockIndex--) {
+        const block = blocks[blockIndex];
+        const toolCallId = firstNonEmptyString(block?.tool_use_id, block?.tool_call_id);
+        if (!toolCallId) continue;
+        const isError = Boolean(block?.is_error || block?.isError);
+        responses.unshift(buildPostmanToolResponse(
+          toolCallId,
+          renderUnknownValue(block?.content),
+          isError,
+        ));
+      }
+    }
+    break;
+  }
+  return responses;
+}
+
+function buildPostmanToolResponse(
+  toolCallId: string,
+  content: string,
+  isError: boolean,
+): PostmanToolResponse {
+  return {
+    toolCallId,
+    content,
+    toolResponseSummary: isError ? "Tool call failed" : "Tool call completed",
+    toolResponseStatus: isError ? "FAILED" : "SUCCESS",
+    ...(isError ? { toolResponseFailureType: "HANDLED_ERROR" as const } : {}),
+  };
+}
+
 function renderMessageContent(content: ChatMessage["content"] | null | undefined): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return content == null ? "" : renderUnknownValue(content);
@@ -1121,6 +1392,7 @@ function logPostmanPayloadDiagnostics(
   phase: "request" | "rejected",
   body: any,
   error?: string,
+  serializedBody?: string,
 ): void {
   const seeds = Array.isArray(body?.input?.seedingMessages)
     ? body.input.seedingMessages
@@ -1132,6 +1404,10 @@ function logPostmanPayloadDiagnostics(
   const schemas = Array.isArray(tools)
     ? tools.map((tool: any) => renderUnknownValue(tool?.parameters))
     : [];
+  const bootstrap = inspectPostmanBootstrapPayload(
+    body,
+    serializedBody ?? JSON.stringify(body),
+  );
   const summary = {
     phase,
     ...(error ? { error } : {}),
@@ -1145,11 +1421,66 @@ function logPostmanPayloadDiagnostics(
     maxToolSchemaChars: schemas.length > 0
       ? Math.max(...schemas.map((schema: string) => schema.length))
       : 0,
+    payloadBytes: bootstrap.payloadBytes,
+    seedBytes: bootstrap.seedBytes,
+    bootstrapMaxBytes: config.postmanBootstrapMaxBytes,
     appVersion: DEFAULT_APP_VERSION,
     nativeToolsHash: body?.clientTools?.nativeToolsHash || "",
   };
   const logger = phase === "rejected" ? console.warn : console.debug;
   logger("[postman] payload diagnostics", summary);
+}
+
+export function inspectPostmanBootstrapPayload(
+  body: any,
+  serializedBody = JSON.stringify(body),
+): PostmanBootstrapPayloadStats {
+  const seeds = Array.isArray(body?.input?.seedingMessages)
+    ? body.input.seedingMessages
+    : [];
+  const tools = body?.clientTools?.thirdParty?.["proxy-tools"]?.tools;
+  return {
+    payloadBytes: Buffer.byteLength(serializedBody, "utf8"),
+    seedBytes: seeds.reduce((total: number, seed: any) => (
+      total + Buffer.byteLength(
+        typeof seed?.content === "string" ? seed.content : "",
+        "utf8",
+      )
+    ), 0),
+    seedCount: seeds.length,
+    toolCount: Array.isArray(tools) ? tools.length : 0,
+    restoredConversation: Boolean(body?.input?.conversationId),
+  };
+}
+
+export function rejectOversizedPostmanBootstrap(
+  body: any,
+  serializedBody: string,
+  maxBytes: number,
+): ProviderResult | null {
+  const stats = inspectPostmanBootstrapPayload(body, serializedBody);
+  if (
+    stats.restoredConversation
+    || stats.payloadBytes <= maxBytes
+  ) {
+    return null;
+  }
+
+  const payloadMiB = (stats.payloadBytes / 1024 / 1024).toFixed(2);
+  const seedMiB = (stats.seedBytes / 1024 / 1024).toFixed(2);
+  const limitMiB = (maxBytes / 1024 / 1024).toFixed(2);
+  return {
+    success: false,
+    requestRejected: true,
+    contextBootstrapTooLarge: true,
+    httpStatus: 413,
+    error:
+      `Postman conversation bootstrap payload is too large (${payloadMiB} MiB > ${limitMiB} MiB; `
+      + `seed=${seedMiB} MiB; tools=${stats.toolCount}). `
+      + "The selected account has no reusable Postman conversation for this session. "
+      + "No existing local context was deleted and no request was sent upstream. "
+      + "Restore the session's original account or start a new chat; MCP tools and the requested model were not changed.",
+  };
 }
 
 function firstFiniteNumber(...values: unknown[]): number | undefined {

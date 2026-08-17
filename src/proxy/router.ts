@@ -116,6 +116,12 @@ export async function routeRequest(
       // belong to this request. Rotating accounts cannot fix them and used to
       // poison every account in the pool with the same error.
       if (result.requestRejected) {
+        if (result.contextBootstrapTooLarge) {
+          // Account selection is provisional until the first request succeeds.
+          // Keep the persisted previous binding intact so a recovered original
+          // account can restore its Postman conversation on the next attempt.
+          pool.releaseSession(request._sessionId, account.id);
+        }
         return { result, account, durationMs, leaseId };
       }
 
